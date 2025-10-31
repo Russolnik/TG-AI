@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Мои Диалоги - AI Assistant</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>💬 Мои Диалоги</h1>
+            <button id="newChatBtn" class="btn btn-primary">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                Новый чат
+            </button>
+        </header>
+
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>Загрузка диалогов...</p>
+        </div>
+
+        <div id="error" class="error" style="display: none;">
+            <p>❌ Произошла ошибка при загрузке данных</p>
+        </div>
+
+        <div id="chatsList" class="chats-list" style="display: none;">
+            <!-- Список чатов будет добавлен динамически -->
+        </div>
+
+        <div id="emptyState" class="empty-state" style="display: none;">
+            <div class="empty-icon">💬</div>
+            <h2>У вас пока нет диалогов</h2>
+            <p>Создайте первый чат, чтобы начать общение с AI!</p>
+            <button class="btn btn-primary" onclick="createNewChat()">
+                Создать первый чат
+            </button>
+        </div>
+    </div>
+
+    <!-- Модальное окно для создания/переименования чата -->
+    <div id="modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Новый чат</h2>
+                <button class="modal-close" onclick="closeModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="text" id="chatTitleInput" placeholder="Название чата" maxlength="50">
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="closeModal()">Отмена</button>
+                    <button class="btn btn-primary" id="modalSubmitBtn" onclick="submitModal()">Создать</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно для подтверждения удаления -->
+    <div id="deleteModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Удалить чат?</h2>
+                <button class="modal-close" onclick="closeDeleteModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <p>Вы уверены, что хотите удалить этот чат? Все сообщения будут удалены безвозвратно.</p>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" onclick="closeDeleteModal()">Отмена</button>
+                    <button class="btn btn-danger" id="confirmDeleteBtn" onclick="confirmDelete()">Удалить</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+
