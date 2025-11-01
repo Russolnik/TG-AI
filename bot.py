@@ -3,6 +3,7 @@
 """
 import logging
 import asyncio
+from flask import Flask
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -1037,3 +1038,21 @@ def main():
 if __name__ == '__main__':
     main()
 
+
+def run_flask() -> None:
+    """Run lightweight Flask app required by hosting."""
+    print("[flask] starting auxiliary web server...")
+    app = Flask(__name__)
+
+    @app.route("/")
+    def home() -> tuple[str, int]:
+        return "Telegram Bot is running (long polling in a separate thread).", 200
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
+
+if __name__ == "__main__":
+    bot_thread = threading.Thread(target=lambda: asyncio.run(start_bot()), daemon=True)
+    bot_thread.start()
+    run_flask()
