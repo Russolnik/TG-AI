@@ -4,7 +4,7 @@
 import logging
 import asyncio
 import threading
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 import re
@@ -694,12 +694,72 @@ async def params_command_callback(query, telegram_id: int):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(message_text, reply_markup=reply_markup)
 
+def is_image_generation_request(text: str) -> bool:
+    """Проверяет, является ли запрос запросом на генерацию изображения"""
+    if not text:
+        return False
+    
+    text_lower = text.lower().strip()
+    
+    # Ключевые слова для генерации изображений
+    generation_keywords = [
+        'сгенерируй',
+        'создай изображение',
+        'нарисуй',
+        'генерируй',
+        'generate',
+        'create image',
+        'создай картинку',
+        'сделай изображение',
+        'сделай картинку',
+        'сгенерируй изображение',
+        'сгенерируй картинку'
+    ]
+    
+    # Проверяем, начинается ли запрос с ключевого слова или содержит его
+    for keyword in generation_keywords:
+        if text_lower.startswith(keyword) or keyword in text_lower:
+            return True
+    
+    return False
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     telegram_id = update.effective_user.id
     user_text = update.message.text
     
     try:
+        # Проверяем, является ли это запросом на генерацию изображения
+        if is_image_generation_request(user_text):
+            # Получаем активный чат
+            chat_id, chat = get_active_chat_for_user(telegram_id, context)
+            if not chat_id:
+                await update.message.reply_text("❌ Ошибка при получении чата.")
+                return
+            
+            # Отправляем статус генерации
+            status_msg = await update.message.reply_text("🎨 Генерирую изображение...")
+            
+            # Получаем обработчики
+            user_handlers = get_handlers_for_user(telegram_id)
+            
+            # Генерируем изображение
+            generated_image = await user_handlers.handle_generate_image(user_text)
+            
+            if generated_image:
+                # Отправляем сгенерированное изображение
+                await status_msg.delete()
+                from io import BytesIO
+                image_buffer = BytesIO(generated_image)
+                image_buffer.name = 'generated_image.png'
+                await update.message.reply_photo(
+                    photo=InputFile(image_buffer, filename='generated_image.png'),
+                    caption=f"🎨 Изображение сгенерировано по запросу: {user_text}"
+                )
+            else:
+                await status_msg.edit_text("❌ Не удалось сгенерировать изображение. Попробуйте еще раз.")
+            return
+        
         # Проверяем, ожидается ли ввод параметра
         if context.user_data.get('waiting_for_param'):
             param_text = user_text.strip()
@@ -883,15 +943,46 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка при получении чата.")
             return
         
+        # Получаем подпись если есть
+        caption = update.message.caption
+        
+        # Проверяем, является ли подпись запросом на генерацию изображения
+        is_generation = caption and is_image_generation_request(caption)
+        
+        if is_generation:
+            # Генерация изображения на основе фото и текста
+            status_msg = await update.message.reply_text("🎨 Генерирую изображение на основе фото...")
+            
+            # Скачиваем фото
+            photo_file = await context.bot.get_file(photo.file_id)
+            photo_data = await photo_file.download_as_bytearray()
+            
+            # Получаем обработчики
+            user_handlers = get_handlers_for_user(telegram_id)
+            
+            # Генерируем изображение на основе референсного фото и текста
+            generated_image = await user_handlers.handle_generate_image(caption, bytes(photo_data))
+            
+            if generated_image:
+                await status_msg.delete()
+                from io import BytesIO
+                image_buffer = BytesIO(generated_image)
+                image_buffer.name = 'generated_image.png'
+                await update.message.reply_photo(
+                    photo=InputFile(image_buffer, filename='generated_image.png'),
+                    caption=f"🎨 Изображение сгенерировано на основе фото и запроса: {caption}"
+                )
+            else:
+                await status_msg.edit_text("❌ Не удалось сгенерировать изображение. Попробуйте еще раз.")
+            return
+        
+        # Обычная обработка фото (анализ)
         # Отправляем статус обработки
         status_msg = await update.message.reply_text("💬 Запрос обрабатывается...")
         
         # Скачиваем фото
         photo_file = await context.bot.get_file(photo.file_id)
         photo_data = await photo_file.download_as_bytearray()
-        
-        # Получаем подпись если есть
-        caption = update.message.caption
         
         # Получаем обработчики
         user_handlers = get_handlers_for_user(telegram_id)
@@ -996,8 +1087,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-async def start_bot():
-    """Асинхронная функция запуска бота"""
+def start_bot():
+    """Синхронная функция запуска бота"""
     # Создаем приложение
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
     
@@ -1031,9 +1122,9 @@ async def start_bot():
     
     application.post_init = post_init
     
-    # Запускаем бота
+    # Запускаем бота (run_polling сам управляет event loop)
     logger.info("Бот запущен!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
 
 def run_flask() -> None:
     """Запуск легковесного Flask приложения, требуемого для хоста Render"""
@@ -1056,7 +1147,7 @@ def run_flask() -> None:
     @app.route("/health")
     def health() -> tuple[str, int]:
         """Health check endpoint для Render"""
-        return "Telegram Bot is running (long polling in a separate thread).", 200
+        return "Telegram Bot is running (long polling in main thread).", 200
     
     @app.route("/<path:path>")
     def serve_static(path):
@@ -1073,10 +1164,17 @@ def run_flask() -> None:
     print(f"[flask] сервер запущен на порту {port}")
     print(f"[flask] Mini App доступен по адресу: http://0.0.0.0:{port}/")
     
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 if __name__ == '__main__':
-    bot_thread = threading.Thread(target=lambda: asyncio.run(start_bot()), daemon=True)
-    bot_thread.start()
-    run_flask()
+    # Flask запускается в отдельном daemon потоке (не блокирует)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Небольшая задержка для запуска Flask сервера
+    import time
+    time.sleep(2)
+    
+    # Бот запускается в главном потоке (run_polling сам управляет event loop)
+    start_bot()
 
