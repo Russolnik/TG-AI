@@ -2,10 +2,9 @@
 Обработчики для различных типов контента (голос, фото, файлы)
 """
 import os
-import whisper
 from pydub import AudioSegment
 from PyPDF2 import PdfReader
-from typing import Optional
+from typing import Optional, List, Dict
 from database import Database
 from gemini_client import GeminiClient
 import config
@@ -18,30 +17,42 @@ def _setup_ffmpeg_path():
         # Устанавливаем путь к FFmpeg для pydub
         AudioSegment.converter = config.FFMPEG_PATH
         AudioSegment.ffmpeg = config.FFMPEG_PATH
-        AudioSegment.ffprobe = config.FFMPEG_PATH.replace('ffmpeg', 'ffprobe')
-    else:
-        # Пробуем найти FFmpeg в директории проекта
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        possible_paths = [
-            os.path.join(project_dir, 'ffmpeg', 'bin', 'ffmpeg.exe'),
-            os.path.join(project_dir, 'ffmpeg.exe'),
-            os.path.join(project_dir, 'ffmpeg-8.0', 'bin', 'ffmpeg.exe'),
-            os.path.join(project_dir, 'ffmpeg-8.0', 'ffmpeg.exe'),
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                AudioSegment.converter = path
-                AudioSegment.ffmpeg = path
-                # Пробуем найти ffprobe
-                ffprobe_path = path.replace('ffmpeg', 'ffprobe')
+        ffprobe_path = config.FFMPEG_PATH.replace('ffmpeg.exe', 'ffprobe.exe').replace('ffmpeg', 'ffprobe')
+        if os.path.exists(ffprobe_path):
+            AudioSegment.ffprobe = ffprobe_path
+        print(f"FFmpeg найден из конфига: {config.FFMPEG_PATH}")
+        return
+    
+    # Пробуем найти FFmpeg в директории проекта (корень проекта)
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    possible_paths = [
+        # Папка ffmpeg в корне проекта
+        os.path.join(project_dir, 'ffmpeg', 'bin', 'ffmpeg.exe'),
+        os.path.join(project_dir, 'ffmpeg', 'ffmpeg.exe'),
+        os.path.join(project_dir, 'ffmpeg.exe'),
+        # Альтернативные варианты
+        os.path.join(project_dir, 'ffmpeg-8.0', 'bin', 'ffmpeg.exe'),
+        os.path.join(project_dir, 'ffmpeg-8.0', 'ffmpeg.exe'),
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            AudioSegment.converter = path
+            AudioSegment.ffmpeg = path
+            # Пробуем найти ffprobe в той же папке
+            ffprobe_path = path.replace('ffmpeg.exe', 'ffprobe.exe')
+            if os.path.exists(ffprobe_path):
+                AudioSegment.ffprobe = ffprobe_path
+            else:
+                # Пробуем в папке bin
+                ffprobe_path = os.path.join(os.path.dirname(path), 'ffprobe.exe')
                 if os.path.exists(ffprobe_path):
                     AudioSegment.ffprobe = ffprobe_path
-                print(f"FFmpeg найден: {path}")
-                return
-        
-        # Если не найден, используем системный FFmpeg
-        print("Используется системный FFmpeg (должен быть в PATH)")
+            print(f"✅ FFmpeg найден: {path}")
+            return
+    
+    # Если не найден, используем системный FFmpeg
+    print("⚠️ Используется системный FFmpeg (должен быть в PATH)")
 
 # Инициализация пути к FFmpeg при импорте модуля
 _setup_ffmpeg_path()
@@ -50,60 +61,38 @@ class ContentHandlers:
     def __init__(self, db: Database, gemini_client: GeminiClient):
         self.db = db
         self.gemini = gemini_client
-        self.whisper_model = None  # Ленивая загрузка модели Whisper
     
-    def _load_whisper_model(self):
-        """Ленивая загрузка модели Whisper"""
-        if self.whisper_model is None:
-            print("Загрузка модели Whisper...")
-            self.whisper_model = whisper.load_model("base")
-            print("Модель Whisper загружена")
-    
-    async def handle_voice(self, voice_file_path: str, user_question: Optional[str] = None) -> str:
+    async def handle_voice(self, voice_file_path: str, user_question: Optional[str] = None, chat_history: Optional[List[Dict]] = None) -> str:
         """
-        Обработка голосового сообщения
+        Обработка голосового сообщения через Gemini
         
         Args:
             voice_file_path: Путь к файлу голосового сообщения (.ogg)
             user_question: Дополнительный вопрос пользователя (если есть)
+            chat_history: История чата для контекста
         
         Returns:
-            Транскрибированный текст и ответ от Gemini
+            Ответ от Gemini с транскрипцией и обработкой
         """
         try:
-            # Ленивая загрузка модели
-            self._load_whisper_model()
+            # Проверяем размер файла
+            file_size = os.path.getsize(voice_file_path)
+            if file_size > config.MAX_FILE_SIZE:
+                return f"❌ Файл слишком большой (максимум {config.MAX_FILE_SIZE / 1024 / 1024:.0f} МБ)"
             
-            # Конвертируем .ogg в .wav для Whisper
-            audio = AudioSegment.from_ogg(voice_file_path)
+            # Читаем аудио файл
+            with open(voice_file_path, 'rb') as f:
+                audio_data = f.read()
             
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-                audio.export(tmp_file.name, format='wav')
-                temp_wav_path = tmp_file.name
+            # Определяем MIME тип
+            mime_type = "audio/ogg"  # По умолчанию для Telegram голосовых
             
-            try:
-                # Транскрибация
-                result = self.whisper_model.transcribe(temp_wav_path)
-                transcribed_text = result["text"]
-                
-                if not transcribed_text.strip():
-                    return "Не удалось распознать речь в голосовом сообщении."
-                
-                # Если есть дополнительный вопрос, объединяем его с транскрипцией
-                if user_question:
-                    final_prompt = f"Пользователь задал вопрос: {user_question}\n\nТакже прислал голосовое сообщение, которое было транскрибировано:\n{transcribed_text}\n\nОтветьте на вопрос пользователя, учитывая содержание голосового сообщения."
-                else:
-                    final_prompt = f"Пользователь прислал голосовое сообщение. Транскрипция:\n{transcribed_text}\n\nОбработайте это сообщение."
-                
-                # Отправляем в Gemini
-                response = self.gemini.chat([{"role": "user", "content": final_prompt}])
-                
-                return f"🎙️ Транскрибировано: {transcribed_text}\n\n💬 Ответ:\n{response}"
-            finally:
-                # Удаляем временный файл
-                if os.path.exists(temp_wav_path):
-                    os.unlink(temp_wav_path)
-                
+            # Отправляем в Gemini для обработки с историей чата
+            # Ответ уже содержит транскрипцию и ответ, без дополнительных префиксов
+            response = self.gemini.analyze_audio(audio_data, mime_type, user_question, chat_history)
+            
+            return response
+            
         except Exception as e:
             print(f"Ошибка при обработке голоса: {e}")
             return f"Произошла ошибка при обработке голосового сообщения: {str(e)}"
@@ -139,6 +128,11 @@ class ContentHandlers:
             Ответ от Gemini с анализом PDF
         """
         try:
+            # Проверяем размер файла
+            file_size = os.path.getsize(pdf_path)
+            if file_size > config.MAX_FILE_SIZE:
+                return f"❌ Файл слишком большой (максимум {config.MAX_FILE_SIZE / 1024 / 1024:.0f} МБ)"
+            
             reader = PdfReader(pdf_path)
             text_content = ""
             
@@ -174,6 +168,11 @@ class ContentHandlers:
             Ответ от Gemini с анализом файла
         """
         try:
+            # Проверяем размер файла
+            file_size = os.path.getsize(file_path)
+            if file_size > config.MAX_FILE_SIZE:
+                return f"❌ Файл слишком большой (максимум {config.MAX_FILE_SIZE / 1024 / 1024:.0f} МБ)"
+            
             # Определяем кодировку и читаем файл
             encodings = ['utf-8', 'windows-1251', 'cp1252', 'latin-1']
             text_content = None
@@ -202,44 +201,42 @@ class ContentHandlers:
     
     async def handle_audio_file(self, audio_path: str, user_question: Optional[str] = None) -> str:
         """
-        Обработка аудио файла (MP3 и другие форматы)
+        Обработка аудио файла через Gemini
         
         Args:
             audio_path: Путь к аудио файлу
             user_question: Вопрос пользователя к содержимому аудио
         
         Returns:
-            Транскрибированный текст и ответ от Gemini
+            Ответ от Gemini с транскрипцией и обработкой
         """
         try:
-            # Используем ту же логику, что и для голоса
-            self._load_whisper_model()
+            # Проверяем размер файла
+            file_size = os.path.getsize(audio_path)
+            if file_size > config.MAX_FILE_SIZE:
+                return f"❌ Файл слишком большой (максимум {config.MAX_FILE_SIZE / 1024 / 1024:.0f} МБ)"
             
-            # Конвертируем в wav для Whisper
-            audio = AudioSegment.from_file(audio_path)
+            # Читаем аудио файл
+            with open(audio_path, 'rb') as f:
+                audio_data = f.read()
             
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-                audio.export(tmp_file.name, format='wav')
-                temp_wav_path = tmp_file.name
+            # Определяем MIME тип
+            if audio_path.endswith('.mp3'):
+                mime_type = "audio/mpeg"
+            elif audio_path.endswith('.wav'):
+                mime_type = "audio/wav"
+            elif audio_path.endswith('.ogg'):
+                mime_type = "audio/ogg"
+            elif audio_path.endswith('.m4a'):
+                mime_type = "audio/mp4"
+            elif audio_path.endswith('.flac'):
+                mime_type = "audio/flac"
+            else:
+                mime_type = "audio/mpeg"
             
-            try:
-                # Транскрибация
-                result = self.whisper_model.transcribe(temp_wav_path)
-                transcribed_text = result["text"]
-                
-                if not transcribed_text.strip():
-                    return "Не удалось распознать речь в аудио файле."
-                
-                if user_question:
-                    final_prompt = f"Пользователь задал вопрос: {user_question}\n\nТакже прислал аудио файл, которое было транскрибировано:\n{transcribed_text}\n\nОтветьте на вопрос пользователя, учитывая содержание аудио."
-                else:
-                    final_prompt = f"Пользователь прислал аудио файл. Транскрипция:\n{transcribed_text}\n\nОбработайте это сообщение."
-                
-                response = self.gemini.chat([{"role": "user", "content": final_prompt}])
-                return f"🎵 Транскрибировано из аудио:\n{transcribed_text}\n\n💬 Ответ:\n{response}"
-            finally:
-                if os.path.exists(temp_wav_path):
-                    os.unlink(temp_wav_path)
+            # Отправляем в Gemini
+            response = self.gemini.analyze_audio(audio_data, mime_type, user_question)
+            return f"🎵 Аудио файл обработан:\n\n{response}"
                 
         except Exception as e:
             print(f"Ошибка при обработке аудио файла: {e}")

@@ -9,18 +9,8 @@ from PIL import Image
 import config
 import os
 
-# Настройка транспорта для Gemini API с учетом региона
-def _configure_gemini_transport():
-    """Настройка транспорта для Gemini API с правильным регионом"""
-    # Базовая конфигурация клиента
-    # Все запросы идут с сервера, а не с клиента
-    
-    # Если указан proxy, используем его для обхода географических ограничений
-    if config.GEMINI_PROXY_URL:
-        # Настройка proxy для httpx (используется внутренне библиотекой google-generativeai)
-        os.environ['HTTP_PROXY'] = config.GEMINI_PROXY_URL
-        os.environ['HTTPS_PROXY'] = config.GEMINI_PROXY_URL
-        print(f"Используется proxy для Gemini API: {config.GEMINI_PROXY_URL}")
+# Настройка транспорта для Gemini API
+# Все запросы идут с сервера, используя IP сервера автоматически
 
 class GeminiClient:
     def __init__(self, api_key: str, model_name: str = 'flash'):
@@ -31,17 +21,8 @@ class GeminiClient:
             api_key: API ключ Gemini
             model_name: Имя модели из config.GEMINI_MODELS (flash, pro, flash-latest)
         """
-        # Настройка с учетом региона и локации
-        # Все запросы к Gemini API идут с сервера, что решает проблему "User location is not supported"
-        try:
-            # Настраиваем proxy если указан (для обхода географических ограничений)
-            _configure_gemini_transport()
-            
-            # Базовая конфигурация - запросы всегда идут с сервера, где запущен бот
-            genai.configure(api_key=api_key)
-        except Exception as e:
-            print(f"Предупреждение: не удалось настроить транспорт для Gemini API: {e}")
-            genai.configure(api_key=api_key)
+        # Настройка - запросы всегда идут с сервера, используя IP сервера
+        genai.configure(api_key=api_key)
         
         # Получаем конфигурацию модели
         model_config = config.GEMINI_MODELS.get(
@@ -81,14 +62,29 @@ class GeminiClient:
             if context_window and len(messages) > context_window:
                 messages = messages[-context_window:]
             
+            # Добавляем инструкцию для форматирования ответа (только для первого пользовательского сообщения)
+            system_prompt = (
+                "Ты AI-ассистент, общайся с пользователем от первого лица (я, мне, меня, мой, я могу, я знаю и т.д.). "
+                "Отвечай так, как будто разговариваешь с пользователем напрямую. "
+                "Используй Markdown форматирование: **жирный текст** для важных моментов, "
+                "*курсив* для акцентов, эмодзи где уместно, "
+                "и структурируй ответ для лучшей читаемости."
+            )
+            
             # Преобразуем историю в формат для Gemini
             # Gemini использует чередующиеся сообщения user/model
             chat_history = []
-            for msg in messages:
+            for i, msg in enumerate(messages):
                 role = "user" if msg['role'] == 'user' else "model"
+                content = msg['content']
+                
+                # Добавляем системный промпт к первому пользовательскому сообщению
+                if role == "user" and i == 0:
+                    content = f"{system_prompt}\n\n{content}"
+                
                 chat_history.append({
                     'role': role,
-                    'parts': [{'text': msg['content']}]
+                    'parts': [{'text': content}]
                 })
             
             # Если есть история, используем chat
@@ -154,4 +150,94 @@ class GeminiClient:
         except Exception as e:
             print(f"Ошибка при обработке текста из файла: {e}")
             return f"Произошла ошибка при обработке файла: {str(e)}"
+    
+    def analyze_audio(self, audio_data: bytes, mime_type: str, user_question: Optional[str] = None, chat_history: Optional[List[Dict]] = None) -> str:
+        """
+        Обработка аудио через Gemini API
+        
+        Args:
+            audio_data: Байты аудио файла
+            mime_type: MIME тип аудио (audio/ogg, audio/mpeg, и т.д.)
+            user_question: Вопрос пользователя (если есть)
+        
+        Returns:
+            Ответ от модели с транскрипцией и обработкой
+        """
+        try:
+            import base64
+            
+            # Конвертируем аудио в base64
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            
+            # Формируем промпт - ответ от первого лица с поиском в истории чата
+            history_context = ""
+            if chat_history and len(chat_history) > 0:
+                # Добавляем контекст истории для поиска информации
+                history_text = "\n".join([
+                    f"{'Пользователь' if msg['role'] == 'user' else 'Ассистент'}: {msg['content'][:200]}"
+                    for msg in chat_history[-5:]  # Последние 5 сообщений для контекста
+                ])
+                history_context = f"\n\nКонтекст предыдущего диалога:\n{history_text}\n\nЕсли вопрос относится к тому, что обсуждалось ранее, используй эту информацию для ответа."
+            
+            if user_question:
+                prompt_text = (
+                    "Транскрибируй голосовое сообщение. "
+                    "Перед ответом обязательно проверь историю диалога выше - возможно, ответ уже был дан ранее или информация есть в контексте. "
+                    "Ответь на вопрос КОНКРЕТНО и ЧЕТКО, обращаясь к пользователю от первого лица (я, мне, меня). "
+                    "Если в истории чата есть информация, которая отвечает на вопрос, используй её. "
+                    "Если не можешь распознать или понять вопрос, скажи: 'Извини, я не смог разобрать твой вопрос' или 'К сожалению, я не распознал все слова в твоем сообщении'. "
+                    "Если понял вопрос, ответь напрямую. "
+                    "Не пиши 'Транскрипция:' или 'Ответ:', просто сразу отвечай. "
+                    "Используй Markdown форматирование: **жирный текст** для важного, эмодзи где уместно."
+                )
+            else:
+                prompt_text = (
+                    "Транскрибируй голосовое сообщение. "
+                    "Перед ответом обязательно проверь историю диалога выше - возможно, ответ уже был дан ранее или информация есть в контексте. "
+                    "Ответь на вопрос или запрос КОНКРЕТНО и ЧЕТКО, обращаясь к пользователю от первого лица (я, мне, меня, мой). "
+                    "Если в истории чата есть информация, которая отвечает на вопрос (например, пользователь ранее рассказывал о своих интересах, предпочтениях, фактах), обязательно используй эту информацию. "
+                    "Если не можешь распознать или понять вопрос, скажи: 'Извини, я не смог ответить на твой вопрос, я не разобрал его' или 'К сожалению, я не смог распознать все слова в твоем голосовом сообщении'. "
+                    "Если понял вопрос, ответь напрямую от первого лица, используя информацию из истории если она есть. "
+                    "Не пиши 'Транскрипция:' или 'Ответ на содержание:', просто сразу отвечай от своего имени. "
+                    "Используй Markdown форматирование: **жирный текст** для важного, эмодзи где уместно для читаемости."
+                ) + history_context
+            
+            # Создаем части контента для Gemini API
+            # Используем правильный формат для мультимодального контента
+            import google.generativeai as genai
+            
+            # Формируем части: текст и аудио
+            parts = [
+                {"text": prompt_text},
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": audio_base64
+                    }
+                }
+            ]
+            
+            # Если есть история, сначала отправляем её в chat, затем аудио
+            if chat_history and len(chat_history) > 0:
+                # Создаем сессию чата с историей
+                chat_history_formatted = []
+                for msg in chat_history:
+                    role = "user" if msg['role'] == 'user' else "model"
+                    chat_history_formatted.append({
+                        'role': role,
+                        'parts': [{'text': msg['content']}]
+                    })
+                
+                # Создаем chat с историей
+                chat = self.model.start_chat(history=chat_history_formatted[:-1] if len(chat_history_formatted) > 1 else [])
+                # Отправляем промпт с аудио
+                response = chat.send_message(parts)
+            else:
+                # Отправляем в Gemini без истории
+                response = self.model.generate_content(parts)
+            
+            return response.text if response.text else "Не удалось обработать голосовое сообщение."
+        except Exception as e:
+            print(f"Ошибка при обработке аудио: {e}")
+            return f"Произошла ошибка при обработке аудио: {str(e)}"
 

@@ -9,10 +9,22 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+    
     <div class="container">
+        <!-- Профиль пользователя -->
+        <div class="user-profile">
+            <div class="user-avatar">
+                <span id="userInitials">👤</span>
+            </div>
+            <div class="user-info">
+                <h2 id="userName">Пользователь</h2>
+            </div>
+        </div>
+
+        <!-- Заголовок и кнопка нового чата -->
         <header>
             <h1>💬 Мои Диалоги</h1>
-            <button id="newChatBtn" class="btn btn-primary">
+            <button id="newChatBtn" class="btn btn-primary floating-btn">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="12" y1="5" x2="12" y2="19"></line>
                     <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -34,11 +46,19 @@
             <!-- Список чатов будет добавлен динамически -->
         </div>
 
+        <!-- Плавающая кнопка создания нового чата -->
+        <button id="floatingNewChatBtn" class="floating-action-btn" onclick="createNewChat()" style="display: none;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+        </button>
+
         <div id="emptyState" class="empty-state" style="display: none;">
-            <div class="empty-icon">💬</div>
-            <h2>У вас пока нет диалогов</h2>
-            <p>Создайте первый чат, чтобы начать общение с AI!</p>
-            <button class="btn btn-primary" onclick="createNewChat()">
+            <div class="empty-icon">☁️</div>
+            <h2>Нет диалогов</h2>
+            <p>Создайте первый чат, чтобы начать общение с AI</p>
+            <button class="btn btn-primary floating-btn" onclick="createNewChat()">
                 Создать первый чат
             </button>
         </div>
@@ -46,6 +66,7 @@
 
     <!-- Модальное окно для создания/переименования чата -->
     <div id="modal" class="modal" style="display: none;">
+        <div class="modal-backdrop" onclick="closeModal()"></div>
         <div class="modal-content">
             <div class="modal-header">
                 <h2 id="modalTitle">Новый чат</h2>
@@ -63,16 +84,17 @@
 
     <!-- Модальное окно для подтверждения удаления -->
     <div id="deleteModal" class="modal" style="display: none;">
+        <div class="modal-backdrop" onclick="closeDeleteModal()"></div>
         <div class="modal-content">
             <div class="modal-header">
                 <h2>Удалить чат?</h2>
                 <button class="modal-close" onclick="closeDeleteModal()">×</button>
             </div>
             <div class="modal-body">
-                <p>Вы уверены, что хотите удалить этот чат? Все сообщения будут удалены безвозвратно.</p>
+                <p>Вы уверены?</p>
                 <div class="modal-actions">
-                    <button class="btn btn-secondary" onclick="closeDeleteModal()">Отмена</button>
-                    <button class="btn btn-danger" id="confirmDeleteBtn" onclick="confirmDelete()">Удалить</button>
+                    <button class="btn btn-secondary" onclick="closeDeleteModal()">Нет</button>
+                    <button class="btn btn-danger" id="confirmDeleteBtn" onclick="confirmDelete()">Да</button>
                 </div>
             </div>
         </div>
@@ -81,4 +103,3 @@
     <script src="app.js"></script>
 </body>
 </html>
-

@@ -163,6 +163,20 @@ class Database:
             print(f"Ошибка при обновлении названия чата: {e}")
             return False
     
+    def set_active_chat(self, telegram_id: int, chat_id: UUID) -> bool:
+        """Установить активный чат для пользователя"""
+        try:
+            # Обновляем пользователя, устанавливая active_chat_id
+            # Если в схеме нет поля active_chat_id, используем логику: последний созданный чат считается активным
+            # Для простоты просто проверяем что чат существует и принадлежит пользователю
+            chat = self.get_chat(chat_id)
+            if chat and chat.get('user_id') == telegram_id:
+                return True
+            return False
+        except Exception as e:
+            print(f"Ошибка при установке активного чата: {e}")
+            return False
+    
     def delete_chat(self, chat_id: UUID) -> bool:
         """Удалить чат (каскадное удаление сообщений)"""
         try:
@@ -172,14 +186,35 @@ class Database:
             print(f"Ошибка при удалении чата: {e}")
             return False
     
-    def get_chat_messages(self, chat_id: UUID, limit: Optional[int] = None) -> List[Dict]:
-        """Получить сообщения чата (с ограничением для контекста)"""
+    def get_chat_messages(self, chat_id: UUID, limit: Optional[int] = None, exclude_media: bool = False) -> List[Dict]:
+        """
+        Получить сообщения чата (с ограничением для контекста)
+        
+        Args:
+            chat_id: ID чата
+            limit: Ограничение количества сообщений
+            exclude_media: Если True, исключает медиа-сообщения (фото, голос, файлы) из результата
+        """
         try:
             query = self.client.table('messages').select('*').eq('chat_id', str(chat_id)).order('timestamp', desc=False)
             if limit:
-                query = query.limit(limit)
+                query = query.limit(limit * 2 if exclude_media else limit)  # Берем больше, чтобы после фильтрации было достаточно
+            
             response = query.execute()
-            return response.data if response.data else []
+            messages = response.data if response.data else []
+            
+            # Исключаем медиа-сообщения если требуется
+            if exclude_media:
+                media_prefixes = ['[Фото]', '[Голосовое', '[PDF:', '[Текстовый файл:', '[Аудио файл:']
+                messages = [
+                    msg for msg in messages 
+                    if not any(msg.get('content', '').startswith(prefix) for prefix in media_prefixes)
+                ]
+                # Ограничиваем после фильтрации
+                if limit:
+                    messages = messages[-limit:]
+            
+            return messages
         except Exception as e:
             print(f"Ошибка при получении сообщений: {e}")
             return []
@@ -209,4 +244,59 @@ class Database:
         except Exception as e:
             print(f"Ошибка при получении активного чата: {e}")
             return None
+    
+    # Методы для работы с параметрами пользователя
+    def get_user_parameters(self, telegram_id: int) -> Dict[str, str]:
+        """Получить все параметры пользователя"""
+        try:
+            response = self.client.table('user_parameters').select('*').eq('user_id', telegram_id).execute()
+            if response.data:
+                return {param['parameter_key']: param['parameter_value'] for param in response.data}
+            return {}
+        except Exception as e:
+            print(f"Ошибка при получении параметров пользователя: {e}")
+            return {}
+    
+    def get_user_parameter(self, telegram_id: int, parameter_key: str) -> Optional[str]:
+        """Получить конкретный параметр пользователя"""
+        try:
+            response = self.client.table('user_parameters').select('*').eq('user_id', telegram_id).eq('parameter_key', parameter_key).execute()
+            if response.data:
+                return response.data[0].get('parameter_value')
+            return None
+        except Exception as e:
+            print(f"Ошибка при получении параметра пользователя: {e}")
+            return None
+    
+    def set_user_parameter(self, telegram_id: int, parameter_key: str, parameter_value: str) -> bool:
+        """Установить параметр пользователя (создать или обновить)"""
+        try:
+            # Используем upsert для создания или обновления
+            self.client.table('user_parameters').upsert({
+                'user_id': telegram_id,
+                'parameter_key': parameter_key,
+                'parameter_value': parameter_value
+            }, on_conflict='user_id,parameter_key').execute()
+            return True
+        except Exception as e:
+            print(f"Ошибка при установке параметра пользователя: {e}")
+            return False
+    
+    def delete_user_parameter(self, telegram_id: int, parameter_key: str) -> bool:
+        """Удалить конкретный параметр пользователя"""
+        try:
+            self.client.table('user_parameters').delete().eq('user_id', telegram_id).eq('parameter_key', parameter_key).execute()
+            return True
+        except Exception as e:
+            print(f"Ошибка при удалении параметра пользователя: {e}")
+            return False
+    
+    def clear_user_parameters(self, telegram_id: int) -> bool:
+        """Очистить все параметры пользователя"""
+        try:
+            self.client.table('user_parameters').delete().eq('user_id', telegram_id).execute()
+            return True
+        except Exception as e:
+            print(f"Ошибка при очистке параметров пользователя: {e}")
+            return False
 

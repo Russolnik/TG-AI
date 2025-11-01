@@ -2,9 +2,11 @@
 Основной файл Telegram-бота
 """
 import logging
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+import asyncio
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
+import re
 import config
 from database import Database
 from api_key_manager import APIKeyManager
@@ -60,6 +62,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• 🎙️ Обработка голосовых сообщений\n"
                 "• 📷 Анализ фотографий\n"
                 "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
+                "💡 **Не забудьте обновить параметры о себе!**\n"
+                "Используйте кнопку ⚙️ Параметры, чтобы рассказать о себе, своих интересах "
+                "или желаемом стиле общения.\n\n"
                 "Отправьте мне сообщение или используйте меню для начала!"
             )
         else:
@@ -71,25 +76,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• 🎙️ Обработка голосовых сообщений\n"
                 "• 📷 Анализ фотографий\n"
                 "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
+                "💡 **Не забудьте указать параметры о себе!**\n"
+                "Используйте кнопку ⚙️ Параметры, чтобы рассказать о себе, своих интересах, "
+                "предпочтениях или желаемом стиле общения. Это поможет мне лучше понимать вас "
+                "и давать более персонализированные ответы.\n\n"
                 "Отправьте мне сообщение или используйте меню для начала!"
             )
         
         await update.message.reply_text(welcome_msg)
         
-        # Создаем меню с кнопкой Mini App
-        keyboard = [
-            [InlineKeyboardButton("📱 Мои Диалоги", web_app={"url": config.MINI_APP_URL})]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "💡 Откройте 'Мои Диалоги' для управления чатами:",
-            reply_markup=reply_markup
-        )
+        # Устанавливаем постоянное меню с кнопками
+        await setup_main_menu(update.message)
         
     except Exception as e:
-        logger.error(f"Ошибка в команде /start: {e}")
+        logger.error(f"Ошибка в команде /start для пользователя {telegram_id}: {e}", exc_info=True)
         await update.message.reply_text(
-            "❌ Произошла ошибка при регистрации. Пожалуйста, попробуйте позже."
+            f"❌ Произошла ошибка при регистрации.\n\n"
+            f"Детали: {str(e)}\n\n"
+            f"Пожалуйста, попробуйте позже или обратитесь к администратору."
         )
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,12 +196,540 @@ async def model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Произошла ошибка при смене модели."
         )
 
+async def params_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /params - управление параметрами пользователя"""
+    telegram_id = update.effective_user.id
+    
+    try:
+        # Получаем текущие параметры
+        parameters = db.get_user_parameters(telegram_id)
+        
+        # Формируем текст параметров (показываем только profile)
+        if parameters:
+            # Показываем только profile параметр (основной текст)
+            params_text = parameters.get('profile', '')
+            if not params_text:
+                # Если profile нет, показываем все параметры
+                params_text = " ".join([f"{key}: {value}" for key, value in parameters.items()])
+            
+            # Ограничение до 40 слов для отображения
+            words = params_text.split()
+            if len(words) > 40:
+                params_text = " ".join(words[:40]) + "..."
+            message_text = f"Ваши параметры: {params_text}"
+        else:
+            message_text = "Ваши параметры: не указаны"
+        
+        # Только 2 кнопки
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить/Изменить", callback_data="param_edit")],
+        ]
+        
+        if parameters:
+            keyboard.append([InlineKeyboardButton("🗑️ Очистить все", callback_data="param_clear_all")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            message_text,
+            reply_markup=reply_markup
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в команде /params: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при получении параметров."
+        )
+
+async def params_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик callback для параметров"""
+    query = update.callback_query
+    await query.answer()
+    
+    telegram_id = query.from_user.id
+    
+    try:
+        callback_data = query.data
+        
+        if callback_data == "param_edit":
+            parameters = db.get_user_parameters(telegram_id)
+            current_text = ""
+            if parameters:
+                # Показываем только profile
+                params_text = parameters.get('profile', '')
+                if not params_text:
+                    params_text = " ".join([f"{key}: {value}" for key, value in parameters.items()])
+                
+                words = params_text.split()
+                if len(words) > 40:
+                    params_text = " ".join(words[:40]) + "..."
+                current_text = f"\n\nТекущие параметры: {params_text}"
+            
+            keyboard = [
+                [InlineKeyboardButton("💾 Сохранить", callback_data="param_save")],
+                [InlineKeyboardButton("❌ Отменить", callback_data="param_cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"✏️ Введите ваши параметры одним текстом (до 40 слов).{current_text}\n\n"
+                "Например: верующий, 25 лет, интересы: программирование музыка спорт",
+                reply_markup=reply_markup
+            )
+            context.user_data['waiting_for_param'] = True
+            return
+        
+        elif callback_data == "param_save":
+            # Сохраняем параметры из контекста
+            param_text = context.user_data.get('param_text', '')
+            if param_text:
+                # Получаем существующие параметры и добавляем к ним новый текст
+                existing_params = db.get_user_parameters(telegram_id)
+                existing_text = existing_params.get('profile', '')
+                
+                # Объединяем старый и новый текст
+                if existing_text:
+                    combined_text = f"{existing_text} {param_text}"
+                else:
+                    combined_text = param_text
+                
+                # Проверяем количество слов
+                words = combined_text.split()
+                word_count = len(words)
+                
+                # Если больше 40 слов, показываем предупреждение, но сохраняем
+                if word_count > 40:
+                    warning_msg = f"⚠️ Внимание: Ваши параметры содержат {word_count} слов (рекомендуется до 40). Последние {word_count - 40} слов могут быть обрезаны при использовании.\n\n"
+                else:
+                    warning_msg = ""
+                
+                # Обрезаем до 40 слов если превышает
+                if word_count > 40:
+                    combined_text = " ".join(words[:40])
+                
+                # Сохраняем объединенные параметры
+                db.set_user_parameter(telegram_id, "profile", combined_text)
+                context.user_data['waiting_for_param'] = None
+                context.user_data['param_text'] = None
+                
+                # Фоновый запрос для инициализации с новыми параметрами
+                asyncio.create_task(warmup_gemini_with_params(telegram_id, combined_text))
+                
+                # Возвращаемся к списку параметров с предупреждением если нужно
+                await params_command_callback(query, telegram_id)
+                
+                if warning_msg:
+                    await query.answer(warning_msg, show_alert=True)
+            else:
+                await query.edit_message_text("❌ Нечего сохранять. Введите параметры сначала.")
+            return
+        
+        elif callback_data == "param_cancel":
+            context.user_data['waiting_for_param'] = None
+            context.user_data['param_text'] = None
+            await params_command_callback(query, telegram_id)
+            return
+        
+        elif callback_data == "param_clear_all":
+            keyboard = [
+                [InlineKeyboardButton("✅ Да", callback_data="param_confirm_clear")],
+                [InlineKeyboardButton("❌ Нет", callback_data="param_cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "Вы уверены?",
+                reply_markup=reply_markup
+            )
+            return
+        
+        elif callback_data == "param_confirm_clear":
+            db.clear_user_parameters(telegram_id)
+            await query.edit_message_text("✅ Все параметры удалены.")
+            return
+        
+    except Exception as e:
+        logger.error(f"Ошибка в callback параметров: {e}")
+        await query.edit_message_text("❌ Произошла ошибка.")
+
+async def setup_main_menu(message):
+    """Настройка постоянного меню с кнопками"""
+    keyboard = [
+        [KeyboardButton("📱 Мои Диалоги")],
+        [KeyboardButton("🤖 Модель"), KeyboardButton("⚙️ Параметры")],
+        [KeyboardButton("➕ Новый чат"), KeyboardButton("🗑️ Удалить чат")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await message.reply_text(
+        "💡 Используйте кнопки меню для навигации:",
+        reply_markup=reply_markup
+    )
+
+async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопок меню"""
+    text = update.message.text
+    telegram_id = update.effective_user.id
+    
+    if text == "📱 Мои Диалоги":
+        # Передаем Supabase конфигурацию через URL параметры
+        import urllib.parse
+        
+        # Проверяем что параметры есть
+        if not config.SUPABASE_URL or not config.SUPABASE_KEY:
+            logger.error("SUPABASE_URL или SUPABASE_KEY не установлены в .env")
+            await update.message.reply_text(
+                "❌ Ошибка конфигурации: Supabase параметры не найдены в .env файле.\n\n"
+                "Убедитесь что в .env есть:\n"
+                "SUPABASE_URL=...\n"
+                "SUPABASE_KEY=..."
+            )
+            return
+        
+        mini_app_url = config.MINI_APP_URL
+        if not mini_app_url or mini_app_url == "https://your-app.netlify.app":
+            logger.error("MINI_APP_URL не установлен в .env")
+            await update.message.reply_text(
+                "❌ Ошибка конфигурации: MINI_APP_URL не установлен в .env файле."
+            )
+            return
+        
+        params = {
+            'supabase_url': config.SUPABASE_URL,
+            'supabase_key': config.SUPABASE_KEY
+        }
+        url_with_params = f"{mini_app_url}?{urllib.parse.urlencode(params)}"
+        
+        logger.info(f"Открываю Mini App: {mini_app_url}")
+        logger.debug(f"URL параметры переданы (supabase_url длина: {len(config.SUPABASE_URL)}, supabase_key длина: {len(config.SUPABASE_KEY)})")
+        
+        keyboard = [
+            [InlineKeyboardButton("📱 Мои Диалоги", web_app={"url": url_with_params})]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "💡 Откройте 'Мои Диалоги' для управления чатами:",
+            reply_markup=reply_markup
+        )
+    elif text == "🤖 Модель":
+        await model_command(update, context)
+    elif text == "⚙️ Параметры":
+        await params_command(update, context)
+    elif text == "➕ Новый чат":
+        await new_chat_command(update, context)
+    elif text == "🗑️ Удалить чат":
+        await delete_chat_command(update, context)
+
+async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создание нового чата"""
+    telegram_id = update.effective_user.id
+    
+    try:
+        # Получаем список всех чатов пользователя для нумерации
+        user_chats = db.get_user_chats(telegram_id)
+        chat_number = len(user_chats) + 1
+        
+        # Создаем новый чат
+        new_chat = db.create_chat(telegram_id, f"Чат {chat_number}")
+        
+        if new_chat:
+            await update.message.reply_text(
+                f"✅ **Новый чат создан!**\n\n"
+                f"Вы можете начать новый диалог с чистого листа.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("❌ Не удалось создать новый чат.")
+    except Exception as e:
+        logger.error(f"Ошибка при создании нового чата: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при создании чата.")
+
+async def delete_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаление текущего чата и всех сообщений"""
+    telegram_id = update.effective_user.id
+    
+    try:
+        # Получаем активный чат
+        chat = db.get_user_active_chat(telegram_id)
+        
+        if not chat:
+            await update.message.reply_text("❌ У вас нет активного чата для удаления.")
+            return
+        
+        chat_id = UUID(chat['chat_id'])
+        chat_title = chat.get('title', 'Чат')
+        
+        # Подтверждение удаления
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да", callback_data="chat_delete_confirm"),
+                InlineKeyboardButton("❌ Нет", callback_data="chat_delete_cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"Вы уверены, что хотите удалить чат **{chat_title}**?",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Сохраняем chat_id в контексте для подтверждения
+        context.user_data['pending_delete_chat_id'] = str(chat_id)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при удалении чата: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при удалении чата.")
+
+async def chat_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик callback для удаления чата"""
+    query = update.callback_query
+    await query.answer()
+    
+    telegram_id = query.from_user.id
+    
+    try:
+        callback_data = query.data
+        
+        if callback_data == "chat_delete_confirm":
+            chat_id_str = context.user_data.get('pending_delete_chat_id')
+            if not chat_id_str:
+                await query.edit_message_text("❌ Ошибка: чат не найден.")
+                return
+            
+            chat_id = UUID(chat_id_str)
+            
+            # Удаляем чат (каскадное удаление всех сообщений)
+            if db.delete_chat(chat_id):
+                context.user_data['pending_delete_chat_id'] = None
+                
+                # Проверяем, есть ли еще чаты у пользователя
+                user_chats = db.get_user_chats(telegram_id)
+                if user_chats:
+                    # Делаем первый доступный чат активным (последний созданный)
+                    new_active_chat = sorted(user_chats, key=lambda x: x['created_at'], reverse=True)[0]
+                    await query.edit_message_text(
+                        f"✅ Чат удален!\n\n"
+                        f"Активным теперь является чат: **{new_active_chat.get('title', 'Чат')}**",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    # Создаем новый чат если нет других
+                    new_chat = db.create_chat(telegram_id, "Чат 1")
+                    await query.edit_message_text(
+                        f"✅ Чат удален!\n\n"
+                        f"Создан новый чат для продолжения работы.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+            else:
+                await query.edit_message_text("❌ Не удалось удалить чат.")
+                
+        elif callback_data == "chat_delete_cancel":
+            context.user_data['pending_delete_chat_id'] = None
+            await query.edit_message_text("Отменено.")
+            
+    except Exception as e:
+        logger.error(f"Ошибка в callback удаления чата: {e}")
+        await query.edit_message_text("❌ Произошла ошибка.")
+
+def format_response_for_telegram(text: str) -> str:
+    """
+    Форматирует ответ для Telegram с точным сохранением форматирования Gemini
+    и добавлением монохромных ссылок. Экранирует HTML спецсимволы для безопасности.
+    """
+    if not text:
+        return ""
+    
+    # Экранируем HTML спецсимволы
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    
+    # Заменяем Markdown ссылки на HTML с монохромным стилем
+    # Формат: [текст](url) -> <a href="url">текст</a>
+    def replace_link(match):
+        link_text = match.group(1).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        link_url = match.group(2)
+        # Проверяем что URL валидный
+        if not link_url.startswith(('http://', 'https://')):
+            return match.group(0)  # Возвращаем как было, если не валидный URL
+        return f'<a href="{link_url}">{link_text}</a>'
+    
+    # Обрабатываем Markdown ссылки [текст](url) - более безопасный паттерн
+    text = re.sub(r'\[([^\]]*)\]\(([^)]*)\)', replace_link, text)
+    
+    # Конвертируем Markdown в HTML
+    # Жирный текст **текст** -> <b>текст</b> (но только если четное количество **)
+    # Обрабатываем попарно
+    parts = text.split('**')
+    result_parts = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            # Обычный текст - обрабатываем курсив и код
+            # Курсив *текст* -> <i>текст</i> (но не если это часть **)
+            part = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<i>\1</i>', part)
+            # Код `текст` -> <code>текст</code>
+            part = re.sub(r'`([^`]+)`', r'<code>\1</code>', part)
+            result_parts.append(part)
+        else:
+            # Жирный текст
+            result_parts.append(f'<b>{part}</b>')
+    text = ''.join(result_parts)
+    
+    # Обрабатываем код блоки ```текст``` -> <pre><code>текст</code></pre>
+    text = re.sub(r'```([^`]+)```', r'<pre><code>\1</code></pre>', text)
+    
+    return text
+
+async def safe_send_message(update: Update, text: str, max_length: int = 4096):
+    """
+    Безопасная отправка сообщения с разбиением на части и обработкой форматирования
+    """
+    if not text:
+        return
+    
+    # Пробуем отправить с HTML форматированием
+    try:
+        formatted = format_response_for_telegram(text)
+        # Разбиваем на части если слишком длинное
+        if len(formatted) > max_length:
+            # Разбиваем по предложениям или абзацам
+            parts = []
+            current_part = ""
+            for line in formatted.split('\n'):
+                if len(current_part) + len(line) + 1 > max_length and current_part:
+                    parts.append(current_part)
+                    current_part = line
+                else:
+                    current_part += ('\n' if current_part else '') + line
+            if current_part:
+                parts.append(current_part)
+            
+            for part in parts:
+                await update.message.reply_text(part, parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(formatted, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning(f"Ошибка HTML форматирования: {e}, пробуем без форматирования")
+        try:
+            # Пробуем как обычный текст, разбивая если нужно
+            if len(text) > max_length:
+                parts = []
+                current_part = ""
+                for line in text.split('\n'):
+                    if len(current_part) + len(line) + 1 > max_length and current_part:
+                        parts.append(current_part)
+                        current_part = line
+                    else:
+                        current_part += ('\n' if current_part else '') + line
+                if current_part:
+                    parts.append(current_part)
+                
+                for part in parts:
+                    await update.message.reply_text(part)
+            else:
+                await update.message.reply_text(text)
+        except Exception as e2:
+            logger.error(f"Критическая ошибка отправки сообщения: {e2}")
+            await update.message.reply_text("❌ Произошла ошибка при отправке ответа.")
+
+async def warmup_gemini_with_params(telegram_id: int, param_text: str):
+    """
+    Фоновый запрос к Gemini для инициализации с новыми параметрами
+    Выполняется невидимо для пользователя
+    """
+    try:
+        # Получаем API-ключ и модель пользователя
+        api_key = key_manager.get_user_api_key(telegram_id)
+        if not api_key:
+            return
+        
+        model_name = db.get_user_model(telegram_id)
+        gemini = GeminiClient(api_key, model_name)
+        
+        # Делаем простой запрос с параметрами для "разогрева"
+        warmup_message = f"[Контекст пользователя: {param_text}]\n\nПривет, это тестовое сообщение."
+        response = gemini.chat([{"role": "user", "content": warmup_message}])
+        logger.info(f"Фоновый запрос для пользователя {telegram_id} выполнен успешно")
+    except Exception as e:
+        logger.error(f"Ошибка фонового запроса для пользователя {telegram_id}: {e}")
+        # Не показываем ошибку пользователю, это фоновый процесс
+
+async def params_command_callback(query, telegram_id: int):
+    """Помощник для обновления списка параметров в callback"""
+    parameters = db.get_user_parameters(telegram_id)
+    
+    if parameters:
+        # Показываем только profile параметр (основной текст)
+        params_text = parameters.get('profile', '')
+        if not params_text:
+            # Если profile нет, показываем все параметры
+            params_text = " ".join([f"{key}: {value}" for key, value in parameters.items()])
+        
+        words = params_text.split()
+        if len(words) > 40:
+            params_text = " ".join(words[:40]) + "..."
+        message_text = f"Ваши параметры: {params_text}"
+    else:
+        message_text = "Ваши параметры: не указаны"
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить/Изменить", callback_data="param_edit")],
+    ]
+    
+    if parameters:
+        keyboard.append([InlineKeyboardButton("🗑️ Очистить все", callback_data="param_clear_all")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(message_text, reply_markup=reply_markup)
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     telegram_id = update.effective_user.id
     user_text = update.message.text
     
     try:
+        # Проверяем, ожидается ли ввод параметра
+        if context.user_data.get('waiting_for_param'):
+            param_text = user_text.strip()
+            
+            # Получаем существующие параметры для предварительного просмотра
+            existing_params = db.get_user_parameters(update.effective_user.id)
+            existing_text = existing_params.get('profile', '')
+            
+            # Объединяем для предварительного просмотра
+            if existing_text:
+                preview_text = f"{existing_text} {param_text}"
+            else:
+                preview_text = param_text
+            
+            # Проверяем количество слов
+            words = preview_text.split()
+            word_count = len(words)
+            
+            # Показываем предупреждение если больше 40, но не блокируем
+            warning = ""
+            if word_count > 40:
+                warning = f"\n\n⚠️ Внимание: После добавления будет {word_count} слов (рекомендуется до 40). Лишние слова будут обрезаны."
+                preview_text = " ".join(words[:40]) + "..."
+            
+            # Сохраняем во временный контекст
+            context.user_data['param_text'] = param_text
+            
+            # Показываем кнопки сохранения/отмены
+            keyboard = [
+                [InlineKeyboardButton("💾 Сохранить", callback_data="param_save")],
+                [InlineKeyboardButton("❌ Отменить", callback_data="param_cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            preview_display = f"📝 Текущие параметры:\n{existing_text if existing_text else '(пусто)'}\n\n➕ Новые параметры:\n{param_text}\n\n📋 Итого:\n{preview_text}{warning}"
+            
+            await update.message.reply_text(
+                preview_display + "\n\nИспользуйте кнопки для сохранения или отмены.",
+                reply_markup=reply_markup
+            )
+            return
+        
+        # Обычная обработка текста
         # Получаем активный чат пользователя
         chat = db.get_user_active_chat(telegram_id)
         if not chat:
@@ -212,17 +744,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Сохраняем сообщение пользователя
         db.add_message(chat_id, "user", user_text)
         
-        # Получаем историю сообщений для контекста
-        messages = db.get_chat_messages(chat_id, limit=config.CONTEXT_WINDOW_SIZE)
+        # Получаем историю сообщений для контекста (исключаем медиа-сообщения)
+        # Медиа обрабатывается независимо и не должно влиять на текстовые ответы
+        messages = db.get_chat_messages(chat_id, limit=config.CONTEXT_WINDOW_SIZE, exclude_media=True)
+        
+        # Получаем параметры пользователя для контекста
+        user_params = db.get_user_parameters(telegram_id)
         
         # Формируем историю для Gemini (только role и content)
-        chat_history = [
-            {"role": msg['role'], "content": msg['content']}
-            for msg in messages
-        ]
+        # Убираем дубликаты по содержанию чтобы избежать повторений
+        # Также проверяем последовательные дубликаты (одинаковые сообщения подряд)
+        seen_contents = set()
+        chat_history = []
+        prev_content = None
+        for msg in messages:
+            content = msg['content']
+            # Пропускаем дубликаты и последовательные одинаковые сообщения
+            if content in seen_contents or content == prev_content:
+                continue
+            seen_contents.add(content)
+            prev_content = content
+            chat_history.append({"role": msg['role'], "content": content})
+        
+        # Добавляем параметры пользователя только если есть история или это первое сообщение
+        if user_params:
+            # Объединяем все параметры в один текст
+            params_text = " ".join([f"{key}: {value}" for key, value in user_params.items()])
+            
+            if len(chat_history) > 0:
+                # Добавляем параметры в последнее сообщение
+                params_context = f"\n\n[Контекст пользователя: {params_text}]"
+                chat_history[-1]['content'] = chat_history[-1]['content'] + params_context
+            else:
+                # Если истории нет, добавляем как отдельное системное сообщение
+                chat_history.insert(0, {
+                    "role": "user",
+                    "content": f"[Контекст пользователя: {params_text}]"
+                })
         
         # Отправляем статус обработки
-        status_msg = await update.message.reply_text("💬 Обрабатываю запрос...")
+        status_msg = await update.message.reply_text("💬 Обрабатываю ваш вопрос...")
         
         # Получаем обработчики с правильным API-ключом
         user_handlers = get_handlers_for_user(telegram_id)
@@ -233,9 +794,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Сохраняем ответ модели
         db.add_message(chat_id, "model", response)
         
-        # Удаляем статус и отправляем ответ
+        # Удаляем статус и отправляем ответ с форматированием
         await status_msg.delete()
-        await update.message.reply_text(response)
+        await safe_send_message(update, response)
         
     except Exception as e:
         logger.error(f"Ошибка при обработке текста: {e}")
@@ -255,35 +816,47 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat = db.create_chat(telegram_id, "Чат 1")
         chat_id = UUID(chat['chat_id'])
         
-        # Отправляем индикатор
-        status_msg = await update.message.reply_text("🎙️ Транскрибирую голосовое сообщение...")
+        # Отправляем статус обработки
+        status_msg = await update.message.reply_text("💬 Обрабатываю ваш вопрос...")
         
         # Скачиваем файл
         voice_file = await context.bot.get_file(voice.file_id)
-        voice_path = f"temp_{voice.file_id}.ogg"
+        voice_path = f"temp_{voice.file_id}_{update.message.message_id}.ogg"
         await voice_file.download_to_drive(voice_path)
         
         try:
             # Получаем подпись если есть
             caption = update.message.caption
             
+            # Получаем историю чата для контекста (исключаем медиа)
+            messages = db.get_chat_messages(chat_id, limit=config.CONTEXT_WINDOW_SIZE, exclude_media=True)
+            chat_history = [
+                {"role": msg['role'], "content": msg['content']}
+                for msg in messages
+            ]
+            
             # Получаем обработчики
             user_handlers = get_handlers_for_user(telegram_id)
             
-            # Обрабатываем голос
-            response = await user_handlers.handle_voice(voice_path, caption)
+            # Обрабатываем голос с историей чата
+            response = await user_handlers.handle_voice(voice_path, caption, chat_history)
             
-            # Сохраняем в БД
-            db.add_message(chat_id, "user", f"[Голосовое сообщение]{f': {caption}' if caption else ''}")
-            db.add_message(chat_id, "model", response)
+            # НЕ сохраняем медиа в историю БД - обрабатываем независимо
+            # Медиа-сообщения не должны влиять на текстовые запросы
+            # Это гарантирует, что следующее текстовое сообщение будет обрабатываться независимо
             
+            # Удаляем статус и отправляем ответ с форматированием
             await status_msg.delete()
-            await update.message.reply_text(response)
+            await safe_send_message(update, response)
         finally:
-            # Удаляем временный файл
+            # Удаляем временный файл (гарантируем удаление)
             import os
-            if os.path.exists(voice_path):
-                os.unlink(voice_path)
+            try:
+                if os.path.exists(voice_path):
+                    os.unlink(voice_path)
+                    print(f"Временный файл удален: {voice_path}")
+            except Exception as e:
+                print(f"Ошибка при удалении временного файла {voice_path}: {e}")
                 
     except Exception as e:
         logger.error(f"Ошибка при обработке голоса: {e}")
@@ -303,8 +876,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat = db.create_chat(telegram_id, "Чат 1")
         chat_id = UUID(chat['chat_id'])
         
-        # Отправляем индикатор
-        status_msg = await update.message.reply_text("📷 Анализирую фото...")
+        # Отправляем статус обработки
+        status_msg = await update.message.reply_text("💬 Запрос обрабатывается...")
         
         # Скачиваем фото
         photo_file = await context.bot.get_file(photo.file_id)
@@ -319,12 +892,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Обрабатываем фото
         response = await user_handlers.handle_photo(bytes(photo_data), caption)
         
-        # Сохраняем в БД
-        db.add_message(chat_id, "user", f"[Фото]{f': {caption}' if caption else ''}")
-        db.add_message(chat_id, "model", response)
+        # НЕ сохраняем медиа в историю - обрабатываем независимо
+        # Это гарантирует, что следующее текстовое сообщение не будет пытаться обработать это фото снова
         
+        # Удаляем статус и отправляем ответ с форматированием
         await status_msg.delete()
-        await update.message.reply_text(response)
+        await safe_send_message(update, response)
         
     except Exception as e:
         logger.error(f"Ошибка при обработке фото: {e}")
@@ -345,12 +918,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat = db.create_chat(telegram_id, "Чат 1")
         chat_id = UUID(chat['chat_id'])
         
-        # Отправляем индикатор
-        status_msg = await update.message.reply_text("📝 Обрабатываю файл...")
+        # Отправляем статус обработки
+        status_msg = await update.message.reply_text("💬 Запрос обрабатывается...")
+        
+        # Проверяем размер файла перед скачиванием
+        if document.file_size and document.file_size > config.MAX_FILE_SIZE:
+            await status_msg.delete()
+            await update.message.reply_text(f"❌ Файл слишком большой ({document.file_size / 1024 / 1024:.1f} МБ). Максимум {config.MAX_FILE_SIZE / 1024 / 1024:.0f} МБ.")
+            return
         
         # Скачиваем файл
         doc_file = await context.bot.get_file(document.file_id)
-        file_path = f"temp_{document.file_id}_{document.file_name}"
+        file_path = f"temp_{document.file_id}_{update.message.message_id}_{document.file_name}"
         await doc_file.download_to_drive(file_path)
         
         try:
@@ -365,26 +944,32 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Определяем тип файла и обрабатываем
             if file_name.endswith('.pdf'):
                 response = await user_handlers.handle_pdf(file_path, caption)
-                db.add_message(chat_id, "user", f"[PDF: {document.file_name}]{f' - {caption}' if caption else ''}")
             elif file_name.endswith(('.txt', '.text')):
                 response = await user_handlers.handle_text_file(file_path, caption)
-                db.add_message(chat_id, "user", f"[Текстовый файл: {document.file_name}]{f' - {caption}' if caption else ''}")
             elif file_name.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
                 response = await user_handlers.handle_audio_file(file_path, caption)
-                db.add_message(chat_id, "user", f"[Аудио файл: {document.file_name}]{f' - {caption}' if caption else ''}")
             else:
                 response = "❌ Неподдерживаемый тип файла. Поддерживаются: PDF, TXT, аудио (MP3, WAV, OGG)."
             
             if response:
-                db.add_message(chat_id, "model", response)
+                # Удаляем статус и отправляем ответ с форматированием
                 await status_msg.delete()
-                await update.message.reply_text(response)
+                try:
+                    formatted_response = format_response_for_telegram(response)
+                    await update.message.reply_text(formatted_response, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    logger.warning(f"Ошибка форматирования: {e}")
+                    await safe_send_message(update, response)
                 
         finally:
-            # Удаляем временный файл
+            # Удаляем временный файл (гарантируем удаление)
             import os
-            if os.path.exists(file_path):
-                os.unlink(file_path)
+            try:
+                if os.path.exists(file_path):
+                    os.unlink(file_path)
+                    print(f"Временный файл удален: {file_path}")
+            except Exception as e:
+                print(f"Ошибка при удалении временного файла {file_path}: {e}")
                 
     except Exception as e:
         logger.error(f"Ошибка при обработке документа: {e}")
@@ -412,11 +997,16 @@ def main():
     # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("model", model_command))
+    application.add_handler(CommandHandler("params", params_command))
     
     # Регистрируем обработчики callback
     application.add_handler(CallbackQueryHandler(model_callback, pattern="^model_"))
+    application.add_handler(CallbackQueryHandler(params_callback, pattern="^param_"))
+    application.add_handler(CallbackQueryHandler(chat_delete_callback, pattern="^chat_delete_"))
     
     # Регистрируем обработчики сообщений
+    # Сначала обрабатываем кнопки меню (до текстовых сообщений)
+    application.add_handler(MessageHandler(filters.Regex("^(📱 Мои Диалоги|🤖 Модель|⚙️ Параметры|➕ Новый чат|🗑️ Удалить чат)$"), handle_menu_button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
@@ -429,7 +1019,8 @@ def main():
     async def post_init(application: Application):
         await application.bot.set_my_commands([
             BotCommand("start", "Запустить бота и зарегистрироваться"),
-            BotCommand("model", "Выбрать модель AI (Flash/Pro)")
+            BotCommand("model", "Выбрать модель AI (Flash/Pro)"),
+            BotCommand("params", "Настроить параметры (кастомизация)")
         ])
     
     application.post_init = post_init

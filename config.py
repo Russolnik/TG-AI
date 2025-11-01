@@ -40,13 +40,6 @@ GEMINI_MODELS = {
         'display_name': 'Gemini 2.5 Pro (Требуется подписка)',
         'available': False,  # Пока заблокировано
         'is_free': False
-    },
-    'flash-latest': {
-        'name': 'gemini-1.5-flash',
-        'vision_name': 'gemini-1.5-flash',
-        'display_name': 'Gemini 1.5 Flash (Альтернатива)',
-        'available': True,
-        'is_free': True
     }
 }
 
@@ -57,10 +50,8 @@ DEFAULT_MODEL = 'flash'
 # Путь к FFmpeg (если есть в проекте или системный)
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", None)  # Путь к ffmpeg.exe (опционально)
 
-# Gemini API Region Configuration
-# Для обхода проблем с локацией используем европейский регион через proxy или настройки транспорта
-GEMINI_API_REGION = os.getenv("GEMINI_API_REGION", "europe-west1")  # Европейский регион
-GEMINI_PROXY_URL = os.getenv("GEMINI_PROXY_URL", None)  # Опциональный proxy для обхода географических ограничений
+# Максимальный размер файла: 200 МБ
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 МБ в байтах
 
 # Проверка обязательных переменных
 if not TELEGRAM_BOT_TOKEN:
