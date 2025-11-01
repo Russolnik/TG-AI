@@ -744,20 +744,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_handlers = get_handlers_for_user(telegram_id)
             
             # Генерируем изображение
-            generated_image = await user_handlers.handle_generate_image(user_text)
-            
-            if generated_image:
-                # Отправляем сгенерированное изображение
-                await status_msg.delete()
-                from io import BytesIO
-                image_buffer = BytesIO(generated_image)
-                image_buffer.name = 'generated_image.png'
-                await update.message.reply_photo(
-                    photo=InputFile(image_buffer, filename='generated_image.png'),
-                    caption=f"🎨 Изображение сгенерировано по запросу: {user_text}"
-                )
-            else:
-                await status_msg.edit_text("❌ Не удалось сгенерировать изображение. Попробуйте еще раз.")
+            try:
+                generated_image = await user_handlers.handle_generate_image(user_text)
+                
+                if generated_image:
+                    # Отправляем сгенерированное изображение
+                    await status_msg.delete()
+                    from io import BytesIO
+                    image_buffer = BytesIO(generated_image)
+                    image_buffer.name = 'generated_image.png'
+                    await update.message.reply_photo(
+                        photo=InputFile(image_buffer, filename='generated_image.png'),
+                        caption=f"🎨 Изображение сгенерировано по запросу: {user_text}"
+                    )
+                else:
+                    await status_msg.edit_text(
+                        "❌ Не удалось сгенерировать изображение.\n\n"
+                        "Возможные причины:\n"
+                        "• Модель генерации изображений временно недоступна\n"
+                        "• Проблема с API ключом\n"
+                        "• Неверный формат запроса\n\n"
+                        "Попробуйте еще раз через несколько секунд."
+                    )
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Ошибка при генерации изображения: {e}", exc_info=True)
+                
+                # Специальная обработка ошибок квоты
+                if "Превышен лимит" in error_msg or "quota" in error_msg.lower() or "429" in error_msg:
+                    await status_msg.edit_text(
+                        "⚠️ Превышен лимит запросов для генерации изображений.\n\n"
+                        f"{error_msg}\n\n"
+                        "На бесплатном тарифе Gemini API есть ограничения на количество генераций изображений в день.\n"
+                        "Попробуйте позже или используйте другой API ключ."
+                    )
+                else:
+                    await status_msg.edit_text(
+                        f"❌ Ошибка при генерации изображения: {error_msg}\n\n"
+                        "Попробуйте еще раз позже."
+                    )
             return
         
         # Проверяем, ожидается ли ввод параметра
@@ -961,19 +986,44 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_handlers = get_handlers_for_user(telegram_id)
             
             # Генерируем изображение на основе референсного фото и текста
-            generated_image = await user_handlers.handle_generate_image(caption, bytes(photo_data))
-            
-            if generated_image:
-                await status_msg.delete()
-                from io import BytesIO
-                image_buffer = BytesIO(generated_image)
-                image_buffer.name = 'generated_image.png'
-                await update.message.reply_photo(
-                    photo=InputFile(image_buffer, filename='generated_image.png'),
-                    caption=f"🎨 Изображение сгенерировано на основе фото и запроса: {caption}"
-                )
-            else:
-                await status_msg.edit_text("❌ Не удалось сгенерировать изображение. Попробуйте еще раз.")
+            try:
+                generated_image = await user_handlers.handle_generate_image(caption, bytes(photo_data))
+                
+                if generated_image:
+                    await status_msg.delete()
+                    from io import BytesIO
+                    image_buffer = BytesIO(generated_image)
+                    image_buffer.name = 'generated_image.png'
+                    await update.message.reply_photo(
+                        photo=InputFile(image_buffer, filename='generated_image.png'),
+                        caption=f"🎨 Изображение сгенерировано на основе фото и запроса: {caption}"
+                    )
+                else:
+                    await status_msg.edit_text(
+                        "❌ Не удалось сгенерировать изображение.\n\n"
+                        "Возможные причины:\n"
+                        "• Модель генерации изображений временно недоступна\n"
+                        "• Проблема с API ключом\n"
+                        "• Неверный формат запроса\n\n"
+                        "Попробуйте еще раз через несколько секунд."
+                    )
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Ошибка при генерации изображения с фото: {e}", exc_info=True)
+                
+                # Специальная обработка ошибок квоты
+                if "Превышен лимит" in error_msg or "quota" in error_msg.lower() or "429" in error_msg:
+                    await status_msg.edit_text(
+                        "⚠️ Превышен лимит запросов для генерации изображений.\n\n"
+                        f"{error_msg}\n\n"
+                        "На бесплатном тарифе Gemini API есть ограничения на количество генераций изображений в день.\n"
+                        "Попробуйте позже или используйте другой API ключ."
+                    )
+                else:
+                    await status_msg.edit_text(
+                        f"❌ Ошибка при генерации изображения: {error_msg}\n\n"
+                        "Попробуйте еще раз позже."
+                    )
             return
         
         # Обычная обработка фото (анализ)
@@ -1141,8 +1191,8 @@ def run_flask() -> None:
     
     @app.route("/")
     def home() -> tuple[str, int]:
-        """Главная страница - отдаем index.html"""
-        return send_from_directory(str(mini_app_dir), 'index.html')
+        """Главная страница - простая фраза"""
+        return "привет", 200
     
     @app.route("/health")
     def health() -> tuple[str, int]:
