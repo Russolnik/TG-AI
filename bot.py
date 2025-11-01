@@ -3,7 +3,7 @@
 """
 import logging
 import asyncio
-from flask import Flask
+import threading
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -996,8 +996,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-def main():
-    """Главная функция запуска бота"""
+async def start_bot():
+    """Асинхронная функция запуска бота"""
     # Создаем приложение
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
     
@@ -1035,24 +1035,48 @@ def main():
     logger.info("Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
-    main()
-
-
 def run_flask() -> None:
-    """Run lightweight Flask app required by hosting."""
-    print("[flask] starting auxiliary web server...")
+    """Запуск легковесного Flask приложения, требуемого для хоста Render"""
+    import os
+    from flask import Flask, send_from_directory
+    from pathlib import Path
+    
+    print("[flask] запуск вспомогательного веб-сервера...")
+    
     app = Flask(__name__)
-
+    
+    # Путь к папке mini_app
+    mini_app_dir = Path(__file__).parent / 'mini_app'
+    
     @app.route("/")
     def home() -> tuple[str, int]:
+        """Главная страница - отдаем index.html"""
+        return send_from_directory(str(mini_app_dir), 'index.html')
+    
+    @app.route("/health")
+    def health() -> tuple[str, int]:
+        """Health check endpoint для Render"""
         return "Telegram Bot is running (long polling in a separate thread).", 200
-
+    
+    @app.route("/<path:path>")
+    def serve_static(path):
+        """Отдаем статические файлы из mini_app (style.css, app.js и т.д.)"""
+        return send_from_directory(str(mini_app_dir), path)
+    
     port = int(os.environ.get("PORT", 5000))
+    
+    # Отключаем логирование Flask (чтобы не засорять логи)
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+    
+    print(f"[flask] сервер запущен на порту {port}")
+    print(f"[flask] Mini App доступен по адресу: http://0.0.0.0:{port}/")
+    
     app.run(host="0.0.0.0", port=port, debug=False)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     bot_thread = threading.Thread(target=lambda: asyncio.run(start_bot()), daemon=True)
     bot_thread.start()
     run_flask()
+
