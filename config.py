@@ -40,6 +40,14 @@ GEMINI_MODELS = {
         'display_name': 'Gemini 2.5 Pro (Требуется подписка)',
         'available': False,  # Пока заблокировано
         'is_free': False
+    },
+    'imagen': {
+        'name': 'gemini-2.5-flash-image',  # Imagen nanoBanana для генерации изображений
+        'vision_name': 'gemini-2.5-flash',
+        'display_name': 'Imagen (Генерация изображений)',
+        'available': True,
+        'is_free': True,
+        'is_image_generation': True
     }
 }
 

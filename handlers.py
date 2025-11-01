@@ -192,4 +192,22 @@ class ContentHandlers:
         except Exception as e:
             print(f"Ошибка при обработке аудио файла: {e}")
             return f"Произошла ошибка при обработке аудио файла: {str(e)}"
+    
+    async def handle_generate_image(self, prompt: str, reference_image: Optional[bytes] = None) -> Optional[bytes]:
+        """
+        Генерация изображения через Imagen
+        
+        Args:
+            prompt: Текстовое описание изображения
+            reference_image: Опциональное референсное изображение
+        
+        Returns:
+            Байты сгенерированного изображения или None при ошибке
+        """
+        try:
+            image_data = self.gemini.generate_image(prompt, reference_image)
+            return image_data
+        except Exception as e:
+            print(f"Ошибка при генерации изображения: {e}")
+            return None
 
