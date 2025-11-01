@@ -423,56 +423,48 @@ async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def about_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды "О проекте" - открывает Mini App"""
     try:
+        # Используем Mini App URL из конфига, или Netlify URL по умолчанию
         mini_app_url = config.MINI_APP_URL
-        if not mini_app_url or mini_app_url == "https://your-app.netlify.app":
-            await update.message.reply_text(
-                "ℹ️ **О проекте**\n\n"
-                "AI Assistant — Telegram-бот с интеграцией Google Gemini API.\n\n"
-                "Что я умею:\n"
-                "• 💬 Текстовый чат\n"
-                "• 🎙️ Обработка голосовых сообщений\n"
-                "• 📷 Анализ фотографий\n"
-                "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
-                "📞 Связь: @rusolnik\n\n"
-                "💎 Поддержать проект: @rusolnik",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
+        
+        # Если URL не установлен или это дефолтный URL, используем Netlify
+        if not mini_app_url or mini_app_url == "https://your-app.netlify.app" or "netlify.app" in mini_app_url:
+            mini_app_url = "https://yourai-bottelegram.netlify.app"
+        
+        # Убираем завершающий слэш если есть
+        mini_app_url = mini_app_url.rstrip('/')
         
         # Проверяем, что URL валидный и начинается с https://
         if not mini_app_url.startswith("https://"):
             logger.error(f"Неверный формат MINI_APP_URL: {mini_app_url}")
-            await update.message.reply_text(
-                "ℹ️ **О проекте**\n\n"
-                "AI Assistant — Telegram-бот с интеграцией Google Gemini API.\n\n"
-                "Что я умею:\n"
-                "• 💬 Текстовый чат\n"
-                "• 🎙️ Обработка голосовых сообщений\n"
-                "• 📷 Анализ фотографий\n"
-                "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
-                "📞 Связь: @rusolnik\n\n"
-                "💎 Поддержать проект: @rusolnik",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
+            mini_app_url = "https://yourai-bottelegram.netlify.app"
         
         logger.info(f"Открытие Mini App с URL: {mini_app_url}")
         
+        # Создаем кнопку с Mini App
         keyboard = [
             [InlineKeyboardButton("ℹ️ О проекте", web_app={"url": mini_app_url})]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # Отправляем короткое сообщение с кнопкой
         await update.message.reply_text(
-            "ℹ️ **Откройте страницу \"О проекте\"**\n\n"
-            "Нажмите на кнопку ниже, чтобы узнать больше о проекте, "
-            "его возможностях и связаться с создателем.",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
+            "Узнать подробнее?",
+            reply_markup=reply_markup
         )
     except Exception as e:
-        logger.error(f"Ошибка в команде 'О проекте': {e}")
-        await update.message.reply_text("❌ Произошла ошибка при открытии страницы.")
+        logger.error(f"Ошибка в команде 'О проекте': {e}", exc_info=True)
+        # Даже при ошибке показываем кнопку с Netlify URL
+        try:
+            keyboard = [
+                [InlineKeyboardButton("ℹ️ О проекте", web_app={"url": "https://yourai-bottelegram.netlify.app"})]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                "Узнать подробнее?",
+                reply_markup=reply_markup
+            )
+        except:
+            await update.message.reply_text("❌ Произошла ошибка при открытии страницы.")
 
 async def delete_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаление текущего чата и всех сообщений"""
