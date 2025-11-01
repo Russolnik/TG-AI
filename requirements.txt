@@ -1,5 +1,5 @@
-# Telegram Bot (совместимо с supabase 2.17.0+)
-python-telegram-bot==20.8
+# Telegram Bot (совместимо с supabase 2.17.0+ и Python 3.13)
+python-telegram-bot>=21.7
 
 # AI & ML
 google-generativeai>=0.3.2

@@ -22,7 +22,7 @@ git push -u origin main
 ### Шаг 2: Настройте параметры деплоя
 
 - **Name**: `tg-ai-bot` (или любое имя)
-- **Environment**: `Python 3`
+- **Environment**: `Python 3` (рекомендуется Python 3.11 или 3.12 для лучшей совместимости)
 - **Region**: `Frankfurt` (близко к Германии для Gemini API)
 - **Branch**: `main`
 - **Root Directory**: `.` (корень проекта)
