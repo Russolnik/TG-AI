@@ -275,8 +275,13 @@ class GeminiClient:
                 print(traceback.format_exc())
                 return None
             
-            # Формируем промпт
+            # Формируем промпт с generation_config для изображений
             try:
+                # Конфигурация для генерации изображения
+                generation_config = genai.types.GenerationConfig(
+                    response_mime_type="image/png"  # Указываем, что хотим получить изображение
+                )
+                
                 if reference_image:
                     # Если есть референсное изображение, используем мультимодальный запрос
                     image = Image.open(BytesIO(reference_image))
@@ -285,11 +290,17 @@ class GeminiClient:
                         image
                     ]
                     print(f"[Генерация изображений] Отправка запроса с референсным изображением")
-                    response = imagen_model.generate_content(parts)
+                    response = imagen_model.generate_content(
+                        parts,
+                        generation_config=generation_config
+                    )
                 else:
                     # Только текстовый промпт
                     print(f"[Генерация изображений] Отправка текстового запроса")
-                    response = imagen_model.generate_content(prompt)
+                    response = imagen_model.generate_content(
+                        prompt,
+                        generation_config=generation_config
+                    )
             except Exception as e:
                 error_str = str(e)
                 # Проверяем ошибку квоты (429)
@@ -308,6 +319,23 @@ class GeminiClient:
                 return None
             
             print(f"[Генерация изображений] Получен ответ от API")
+            print(f"[Генерация изображений] Тип response: {type(response)}")
+            
+            # При использовании response_mime_type="image/png" изображение возвращается в response.parts[0].inline_data.data
+            # Проверяем сначала это
+            if hasattr(response, 'parts') and response.parts:
+                print(f"[Генерация изображений] Найден response.parts, количество: {len(response.parts)}")
+                for i, part in enumerate(response.parts):
+                    print(f"[Генерация изображений] Часть {i}: {type(part)}")
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        print(f"[Генерация изображений] Найдено inline_data в части {i}")
+                        if hasattr(part.inline_data, 'data'):
+                            print(f"[Генерация изображений] Извлечение base64 данных")
+                            image_data = base64.b64decode(part.inline_data.data)
+                            print(f"[Генерация изображений] Изображение извлечено из parts[{i}], размер: {len(image_data)}")
+                            return image_data
+                        elif hasattr(part.inline_data, 'mime_type'):
+                            print(f"[Генерация изображений] MIME тип: {part.inline_data.mime_type}")
             
             # Получаем изображение из ответа
             # Проверяем прямой атрибут image (Gemini 2.5 Flash Image)
@@ -362,8 +390,34 @@ class GeminiClient:
             if hasattr(response, 'text') and response.text:
                 print(f"[Генерация изображений] Найден response.text: {response.text[:100] if len(response.text) > 100 else response.text}")
             
-            print("[Генерация изображений] Не удалось извлечь изображение из ответа Imagen")
+            # Дополнительные проверки - может быть изображение в другом формате
+            print("[Генерация изображений] Не удалось извлечь изображение стандартными методами")
             print(f"[Генерация изображений] Структура ответа: candidates={bool(response.candidates)}, text={bool(getattr(response, 'text', None))}")
+            
+            # Пробуем получить весь response как строку для отладки
+            try:
+                response_str = str(response)
+                print(f"[Генерация изображений] Полный ответ (первые 500 символов): {response_str[:500]}")
+            except:
+                pass
+            
+            # Проверяем, может быть изображение возвращается через другой API метод
+            # Для Gemini 2.5 Flash Image может потребоваться специальный метод
+            try:
+                # Проверяем, есть ли в response методы для получения изображения
+                if hasattr(response, 'parts'):
+                    print(f"[Генерация изображений] Найден response.parts")
+                    for part in response.parts:
+                        if hasattr(part, 'inline_data'):
+                            print(f"[Генерация изображений] Найдено inline_data в parts")
+                            if hasattr(part.inline_data, 'data'):
+                                image_data = base64.b64decode(part.inline_data.data)
+                                print(f"[Генерация изображений] Изображение извлечено из response.parts, размер: {len(image_data)}")
+                                return image_data
+            except Exception as e:
+                print(f"[Генерация изображений] Ошибка при проверке response.parts: {e}")
+            
+            print("[Генерация изображений] Итог: Не удалось извлечь изображение из ответа Imagen")
             return None
             
         except Exception as e:
