@@ -439,6 +439,25 @@ async def about_project_command(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
         
+        # Проверяем, что URL валидный и начинается с https://
+        if not mini_app_url.startswith("https://"):
+            logger.error(f"Неверный формат MINI_APP_URL: {mini_app_url}")
+            await update.message.reply_text(
+                "ℹ️ **О проекте**\n\n"
+                "AI Assistant — Telegram-бот с интеграцией Google Gemini API.\n\n"
+                "Что я умею:\n"
+                "• 💬 Текстовый чат\n"
+                "• 🎙️ Обработка голосовых сообщений\n"
+                "• 📷 Анализ фотографий\n"
+                "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
+                "📞 Связь: @rusolnik\n\n"
+                "💎 Поддержать проект: @rusolnik",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        logger.info(f"Открытие Mini App с URL: {mini_app_url}")
+        
         keyboard = [
             [InlineKeyboardButton("ℹ️ О проекте", web_app={"url": mini_app_url})]
         ]
