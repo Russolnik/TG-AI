@@ -46,10 +46,6 @@ GEMINI_MODELS = {
 # Модель по умолчанию
 DEFAULT_MODEL = 'flash'
 
-# FFmpeg Configuration
-# Путь к FFmpeg (если есть в проекте или системный)
-FFMPEG_PATH = os.getenv("FFMPEG_PATH", None)  # Путь к ffmpeg.exe (опционально)
-
 # Максимальный размер файла: 200 МБ
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 МБ в байтах
 

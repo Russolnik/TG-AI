@@ -56,12 +56,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif status == "existing_user":
             welcome_msg = (
                 "👋 Добро пожаловать обратно!\n\n"
-                "Я ваш AI-ассистент на основе Gemini.\n\n"
+                "Я твой помощник на основе Gemini.\n\n"
                 "Что я умею:\n"
                 "• 💬 Текстовый чат\n"
                 "• 🎙️ Обработка голосовых сообщений\n"
                 "• 📷 Анализ фотографий\n"
-                "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
+                "• 📄 Обработка файлов (PDF, TXT, аудио) до 200 МБ\n\n"
                 "💡 **Не забудьте обновить параметры о себе!**\n"
                 "Используйте кнопку ⚙️ Параметры, чтобы рассказать о себе, своих интересах "
                 "или желаемом стиле общения.\n\n"
@@ -70,12 +70,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             welcome_msg = (
                 "👋 Добро пожаловать!\n\n"
-                "Я ваш AI-ассистент на основе Gemini.\n\n"
+                "Я твой помощник на основе Gemini.\n\n"
                 "Что я умею:\n"
                 "• 💬 Текстовый чат\n"
                 "• 🎙️ Обработка голосовых сообщений\n"
                 "• 📷 Анализ фотографий\n"
-                "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
+                "• 📄 Обработка файлов (PDF, TXT, аудио) до 200 МБ\n\n"
                 "💡 **Не забудьте указать параметры о себе!**\n"
                 "Используйте кнопку ⚙️ Параметры, чтобы рассказать о себе, своих интересах, "
                 "предпочтениях или желаемом стиле общения. Это поможет мне лучше понимать вас "
@@ -354,9 +354,9 @@ async def params_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setup_main_menu(message):
     """Настройка постоянного меню с кнопками"""
     keyboard = [
-        [KeyboardButton("📱 Мои Диалоги")],
         [KeyboardButton("🤖 Модель"), KeyboardButton("⚙️ Параметры")],
-        [KeyboardButton("➕ Новый чат"), KeyboardButton("🗑️ Удалить чат")]
+        [KeyboardButton("➕ Новый чат")],
+        [KeyboardButton("ℹ️ О проекте")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await message.reply_text(
@@ -364,59 +364,36 @@ async def setup_main_menu(message):
         reply_markup=reply_markup
     )
 
+def get_active_chat_for_user(telegram_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Получить активный чат пользователя (последний созданный)
+    
+    Returns:
+        tuple: (chat_id: UUID, chat: Dict) или (None, None) если ошибка
+    """
+    # Используем активный чат по умолчанию
+    chat = db.get_user_active_chat(telegram_id)
+    if not chat:
+        chat = db.create_chat(telegram_id, "Чат 1")
+    
+    if chat:
+        return UUID(chat['chat_id']), chat
+    
+    return None, None
+
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопок меню"""
     text = update.message.text
     telegram_id = update.effective_user.id
     
-    if text == "📱 Мои Диалоги":
-        # Передаем Supabase конфигурацию через URL параметры
-        import urllib.parse
-        
-        # Проверяем что параметры есть
-        if not config.SUPABASE_URL or not config.SUPABASE_KEY:
-            logger.error("SUPABASE_URL или SUPABASE_KEY не установлены в .env")
-            await update.message.reply_text(
-                "❌ Ошибка конфигурации: Supabase параметры не найдены в .env файле.\n\n"
-                "Убедитесь что в .env есть:\n"
-                "SUPABASE_URL=...\n"
-                "SUPABASE_KEY=..."
-            )
-            return
-        
-        mini_app_url = config.MINI_APP_URL
-        if not mini_app_url or mini_app_url == "https://your-app.netlify.app":
-            logger.error("MINI_APP_URL не установлен в .env")
-            await update.message.reply_text(
-                "❌ Ошибка конфигурации: MINI_APP_URL не установлен в .env файле."
-            )
-            return
-        
-        params = {
-            'supabase_url': config.SUPABASE_URL,
-            'supabase_key': config.SUPABASE_KEY
-        }
-        url_with_params = f"{mini_app_url}?{urllib.parse.urlencode(params)}"
-        
-        logger.info(f"Открываю Mini App: {mini_app_url}")
-        logger.debug(f"URL параметры переданы (supabase_url длина: {len(config.SUPABASE_URL)}, supabase_key длина: {len(config.SUPABASE_KEY)})")
-        
-        keyboard = [
-            [InlineKeyboardButton("📱 Мои Диалоги", web_app={"url": url_with_params})]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "💡 Откройте 'Мои Диалоги' для управления чатами:",
-            reply_markup=reply_markup
-        )
-    elif text == "🤖 Модель":
+    if text == "🤖 Модель":
         await model_command(update, context)
     elif text == "⚙️ Параметры":
         await params_command(update, context)
     elif text == "➕ Новый чат":
         await new_chat_command(update, context)
-    elif text == "🗑️ Удалить чат":
-        await delete_chat_command(update, context)
+    elif text == "ℹ️ О проекте":
+        await about_project_command(update, context)
 
 async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Создание нового чата"""
@@ -441,6 +418,41 @@ async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при создании нового чата: {e}")
         await update.message.reply_text("❌ Произошла ошибка при создании чата.")
+
+async def about_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды "О проекте" - открывает Mini App"""
+    try:
+        mini_app_url = config.MINI_APP_URL
+        if not mini_app_url or mini_app_url == "https://your-app.netlify.app":
+            await update.message.reply_text(
+                "ℹ️ **О проекте**\n\n"
+                "AI Assistant — Telegram-бот с интеграцией Google Gemini API.\n\n"
+                "Что я умею:\n"
+                "• 💬 Текстовый чат\n"
+                "• 🎙️ Обработка голосовых сообщений\n"
+                "• 📷 Анализ фотографий\n"
+                "• 📄 Обработка файлов (PDF, TXT, аудио)\n\n"
+                "📞 Связь: @rusolnik\n\n"
+                "💎 Поддержать проект: @rusolnik",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton("ℹ️ О проекте", web_app={"url": mini_app_url})]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "ℹ️ **Откройте страницу \"О проекте\"**\n\n"
+            "Нажмите на кнопку ниже, чтобы узнать больше о проекте, "
+            "его возможностях и связаться с создателем.",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в команде 'О проекте': {e}")
+        await update.message.reply_text("❌ Произошла ошибка при открытии страницы.")
 
 async def delete_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаление текущего чата и всех сообщений"""
@@ -730,16 +742,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         # Обычная обработка текста
-        # Получаем активный чат пользователя
-        chat = db.get_user_active_chat(telegram_id)
-        if not chat:
-            # Создаем новый чат если его нет
-            chat = db.create_chat(telegram_id, "Чат 1")
-            if not chat:
-                await update.message.reply_text("❌ Ошибка при создании чата.")
-                return
-        
-        chat_id = UUID(chat['chat_id'])
+        chat_id, chat = get_active_chat_for_user(telegram_id, context)
+        if not chat_id:
+            await update.message.reply_text("❌ Ошибка при получении чата.")
+            return
         
         # Сохраняем сообщение пользователя
         db.add_message(chat_id, "user", user_text)
@@ -811,10 +817,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Получаем активный чат
-        chat = db.get_user_active_chat(telegram_id)
-        if not chat:
-            chat = db.create_chat(telegram_id, "Чат 1")
-        chat_id = UUID(chat['chat_id'])
+        chat_id, chat = get_active_chat_for_user(telegram_id, context)
+        if not chat_id:
+            await update.message.reply_text("❌ Ошибка при получении чата.")
+            return
         
         # Отправляем статус обработки
         status_msg = await update.message.reply_text("💬 Обрабатываю ваш вопрос...")
@@ -871,10 +877,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Получаем активный чат
-        chat = db.get_user_active_chat(telegram_id)
-        if not chat:
-            chat = db.create_chat(telegram_id, "Чат 1")
-        chat_id = UUID(chat['chat_id'])
+        chat_id, chat = get_active_chat_for_user(telegram_id, context)
+        if not chat_id:
+            await update.message.reply_text("❌ Ошибка при получении чата.")
+            return
         
         # Отправляем статус обработки
         status_msg = await update.message.reply_text("💬 Запрос обрабатывается...")
@@ -913,10 +919,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Получаем активный чат
-        chat = db.get_user_active_chat(telegram_id)
-        if not chat:
-            chat = db.create_chat(telegram_id, "Чат 1")
-        chat_id = UUID(chat['chat_id'])
+        chat_id, chat = get_active_chat_for_user(telegram_id, context)
+        if not chat_id:
+            await update.message.reply_text("❌ Ошибка при получении чата.")
+            return
         
         # Отправляем статус обработки
         status_msg = await update.message.reply_text("💬 Запрос обрабатывается...")
@@ -1002,11 +1008,10 @@ def main():
     # Регистрируем обработчики callback
     application.add_handler(CallbackQueryHandler(model_callback, pattern="^model_"))
     application.add_handler(CallbackQueryHandler(params_callback, pattern="^param_"))
-    application.add_handler(CallbackQueryHandler(chat_delete_callback, pattern="^chat_delete_"))
     
     # Регистрируем обработчики сообщений
     # Сначала обрабатываем кнопки меню (до текстовых сообщений)
-    application.add_handler(MessageHandler(filters.Regex("^(📱 Мои Диалоги|🤖 Модель|⚙️ Параметры|➕ Новый чат|🗑️ Удалить чат)$"), handle_menu_button))
+    application.add_handler(MessageHandler(filters.Regex("^(🤖 Модель|⚙️ Параметры|➕ Новый чат|ℹ️ О проекте)$"), handle_menu_button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))

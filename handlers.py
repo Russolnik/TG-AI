@@ -2,60 +2,11 @@
 Обработчики для различных типов контента (голос, фото, файлы)
 """
 import os
-from pydub import AudioSegment
 from PyPDF2 import PdfReader
 from typing import Optional, List, Dict
 from database import Database
 from gemini_client import GeminiClient
 import config
-import tempfile
-
-# Настройка пути к FFmpeg
-def _setup_ffmpeg_path():
-    """Настройка пути к FFmpeg"""
-    if config.FFMPEG_PATH and os.path.exists(config.FFMPEG_PATH):
-        # Устанавливаем путь к FFmpeg для pydub
-        AudioSegment.converter = config.FFMPEG_PATH
-        AudioSegment.ffmpeg = config.FFMPEG_PATH
-        ffprobe_path = config.FFMPEG_PATH.replace('ffmpeg.exe', 'ffprobe.exe').replace('ffmpeg', 'ffprobe')
-        if os.path.exists(ffprobe_path):
-            AudioSegment.ffprobe = ffprobe_path
-        print(f"FFmpeg найден из конфига: {config.FFMPEG_PATH}")
-        return
-    
-    # Пробуем найти FFmpeg в директории проекта (корень проекта)
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    possible_paths = [
-        # Папка ffmpeg в корне проекта
-        os.path.join(project_dir, 'ffmpeg', 'bin', 'ffmpeg.exe'),
-        os.path.join(project_dir, 'ffmpeg', 'ffmpeg.exe'),
-        os.path.join(project_dir, 'ffmpeg.exe'),
-        # Альтернативные варианты
-        os.path.join(project_dir, 'ffmpeg-8.0', 'bin', 'ffmpeg.exe'),
-        os.path.join(project_dir, 'ffmpeg-8.0', 'ffmpeg.exe'),
-    ]
-    
-    for path in possible_paths:
-        if os.path.exists(path):
-            AudioSegment.converter = path
-            AudioSegment.ffmpeg = path
-            # Пробуем найти ffprobe в той же папке
-            ffprobe_path = path.replace('ffmpeg.exe', 'ffprobe.exe')
-            if os.path.exists(ffprobe_path):
-                AudioSegment.ffprobe = ffprobe_path
-            else:
-                # Пробуем в папке bin
-                ffprobe_path = os.path.join(os.path.dirname(path), 'ffprobe.exe')
-                if os.path.exists(ffprobe_path):
-                    AudioSegment.ffprobe = ffprobe_path
-            print(f"✅ FFmpeg найден: {path}")
-            return
-    
-    # Если не найден, используем системный FFmpeg
-    print("⚠️ Используется системный FFmpeg (должен быть в PATH)")
-
-# Инициализация пути к FFmpeg при импорте модуля
-_setup_ffmpeg_path()
 
 class ContentHandlers:
     def __init__(self, db: Database, gemini_client: GeminiClient):

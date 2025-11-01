@@ -20,12 +20,14 @@
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-family: 'Comfortaa', 'Rubik', 'Montserrat', sans-serif;
     background-color: var(--cardboard-bg);
     color: var(--text-primary);
     min-height: 100vh;
     position: relative;
     overflow-x: hidden;
+    font-weight: 400;
+    letter-spacing: 0.03em;
     /* Текстура белого картона */
     background-image: 
         repeating-linear-gradient(
@@ -51,12 +53,273 @@ body {
     background-size: 20px 20px, 20px 20px, 100% 100%;
 }
 
+/* Стили для страницы "О проекте" */
+.about-header {
+    text-align: center;
+    margin-bottom: 32px;
+    animation: fadeInUp 0.6s ease-out;
+}
+
+.about-header h1 {
+    font-size: 36px;
+    margin-bottom: 8px;
+    color: var(--sky-blue-darker);
+    font-weight: 500;
+    font-family: 'Comfortaa', 'Rubik', 'Montserrat', sans-serif;
+    letter-spacing: 0.04em;
+}
+
+.subtitle {
+    color: var(--text-secondary);
+    font-size: 16px;
+}
+
+.about-content {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    margin-bottom: 32px;
+}
+
+.about-section {
+    background: var(--cloud-white);
+    backdrop-filter: blur(10px);
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 4px 20px var(--shadow-soft);
+    animation: fadeInUp 0.6s ease-out;
+    border: 1px solid rgba(79, 195, 247, 0.1);
+}
+
+.about-section h2 {
+    font-size: 24px;
+    margin-bottom: 16px;
+    color: var(--sky-blue-darker);
+    text-align: left;
+    font-weight: 500;
+    font-family: 'Comfortaa', 'Rubik', 'Montserrat', sans-serif;
+    letter-spacing: 0.03em;
+}
+
+.about-section p {
+    color: var(--text-primary);
+    line-height: 1.8;
+    margin-bottom: 16px;
+    text-align: left;
+    font-size: 15px;
+}
+
+.features-list {
+    list-style: none;
+    padding: 0;
+}
+
+.features-list li {
+    padding: 12px 0;
+    color: var(--text-primary);
+    border-bottom: 1px solid rgba(79, 195, 247, 0.1);
+    line-height: 1.6;
+}
+
+.features-list li:last-child {
+    border-bottom: none;
+}
+
+.contact-info {
+    text-align: left;
+}
+
+.contact-info p {
+    margin-bottom: 12px;
+}
+
+.contact-link {
+    font-size: 18px;
+    font-weight: bold;
+    color: var(--sky-blue-darker);
+    margin: 12px 0;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, rgba(79, 195, 247, 0.1) 0%, rgba(41, 182, 246, 0.1) 100%);
+    border-radius: 12px;
+    display: inline-block;
+    text-align: center;
+    text-decoration: none;
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.contact-link:hover {
+    background: linear-gradient(135deg, rgba(79, 195, 247, 0.2) 0%, rgba(41, 182, 246, 0.2) 100%);
+    transform: scale(1.05);
+    box-shadow: 0 4px 12px rgba(79, 195, 247, 0.3);
+}
+
+.contact-link:active {
+    transform: scale(0.98);
+}
+
+.contact-note {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-top: 12px;
+    text-align: left;
+    line-height: 1.6;
+}
+
+.support-box {
+    background: linear-gradient(135deg, rgba(79, 195, 247, 0.1) 0%, rgba(41, 182, 246, 0.1) 100%);
+    border-radius: 16px;
+    padding: 20px;
+    margin-top: 16px;
+    text-align: left;
+    border: 1px solid rgba(79, 195, 247, 0.2);
+}
+
+.support-box p {
+    margin-bottom: 12px;
+    text-align: left;
+}
+
+.support-box .contact-link {
+    margin: 8px 0;
+}
+
+.about-footer {
+    text-align: center;
+    padding: 24px 0;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.version {
+    margin-top: 8px;
+    font-size: 12px;
+    opacity: 0.7;
+}
+
 .container {
     max-width: 100%;
     margin: 0 auto;
     padding: 20px 16px;
     position: relative;
     z-index: 1;
+}
+
+/* Маленькие анимированные облачка с 3D эффектом */
+.mini-cloud {
+    position: fixed;
+    font-size: 120px;
+    opacity: 0.4;
+    pointer-events: none;
+    z-index: 2;
+    user-select: none;
+    animation: float3D 8s infinite ease-in-out;
+    filter: blur(0.5px);
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    transform-style: preserve-3d;
+    perspective: 1000px;
+}
+
+.cloud-1 {
+    top: 15%;
+    left: 10%;
+    animation-duration: 10s;
+    animation-delay: 0s;
+    font-size: 100px;
+    z-index: 10;
+}
+
+.cloud-2 {
+    top: 8%;
+    right: 15%;
+    animation-duration: 12s;
+    animation-delay: -2s;
+    font-size: 90px;
+    z-index: 10;
+}
+
+.cloud-3 {
+    top: 45%;
+    left: 5%;
+    animation-duration: 9s;
+    animation-delay: -4s;
+    font-size: 110px;
+    z-index: 10;
+}
+
+.cloud-4 {
+    top: 60%;
+    right: 8%;
+    animation-duration: 11s;
+    animation-delay: -1s;
+    font-size: 95px;
+    z-index: 10;
+}
+
+.cloud-5 {
+    top: 75%;
+    left: 12%;
+    animation-duration: 13s;
+    animation-delay: -3s;
+    font-size: 105px;
+    z-index: 10;
+}
+
+.cloud-6 {
+    top: 30%;
+    right: 5%;
+    animation-duration: 10.5s;
+    animation-delay: -5s;
+    font-size: 85px;
+    z-index: 10;
+}
+
+.cloud-7 {
+    top: 85%;
+    right: 20%;
+    animation-duration: 14s;
+    animation-delay: -6s;
+    font-size: 100px;
+    z-index: 10;
+}
+
+@keyframes float3D {
+    0% {
+        transform: translate3d(0, 0, 0) rotateX(0deg) rotateY(0deg) rotateZ(0deg);
+        opacity: 0.3;
+    }
+    25% {
+        transform: translate3d(15px, -10px, 5px) rotateX(5deg) rotateY(-3deg) rotateZ(2deg);
+        opacity: 0.45;
+    }
+    50% {
+        transform: translate3d(-10px, 8px, -3px) rotateX(-3deg) rotateY(5deg) rotateZ(-2deg);
+        opacity: 0.35;
+    }
+    75% {
+        transform: translate3d(8px, -5px, 4px) rotateX(3deg) rotateY(-4deg) rotateZ(1deg);
+        opacity: 0.4;
+    }
+    100% {
+        transform: translate3d(0, 0, 0) rotateX(0deg) rotateY(0deg) rotateZ(0deg);
+        opacity: 0.3;
+    }
+}
+
+/* Облачка поверх окон и текста */
+.about-section {
+    position: relative;
+    z-index: 3;
+}
+
+.about-header {
+    position: relative;
+    z-index: 3;
+}
+
+.about-footer {
+    position: relative;
+    z-index: 3;
 }
 
 /* Профиль пользователя */
