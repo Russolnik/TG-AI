@@ -23,6 +23,7 @@ class GeminiClient:
         """
         # Настройка - запросы всегда идут с сервера, используя IP сервера
         genai.configure(api_key=api_key)
+        self.api_key = api_key  # Сохраняем для использования в новой библиотеке
         
         # Получаем конфигурацию модели
         model_config = config.GEMINI_MODELS.get(
@@ -102,13 +103,14 @@ class GeminiClient:
             print(f"Ошибка при обращении к Gemini API: {e}")
             return f"Произошла ошибка при обработке запроса: {str(e)}"
     
-    def analyze_image(self, image_data: bytes, user_question: str = "Что на этом изображении?") -> str:
+    def analyze_image(self, image_data: bytes, user_question: str = "Что на этом изображении?", chat_history: Optional[List[Dict]] = None) -> str:
         """
         Анализ изображения с помощью Gemini Vision
         
         Args:
             image_data: Байты изображения
             user_question: Вопрос пользователя к изображению
+            chat_history: История чата для контекста (опционально)
         
         Returns:
             Ответ модели
@@ -117,11 +119,28 @@ class GeminiClient:
             # Конвертируем байты в PIL Image
             image = Image.open(BytesIO(image_data))
             
-            # Отправляем запрос в vision модель
-            response = self.vision_model.generate_content([
-                user_question,
-                image
-            ])
+            # Если есть история чата, формируем промпт с контекстом
+            if chat_history and len(chat_history) > 0:
+                # Добавляем контекст предыдущего диалога
+                history_text = "\n".join([
+                    f"{'Пользователь' if msg['role'] == 'user' else 'Ассистент'}: {msg['content'][:200]}"
+                    for msg in chat_history[-5:]  # Последние 5 сообщений для контекста
+                ])
+                
+                # Объединяем историю и вопрос пользователя
+                enhanced_question = f"{user_question}\n\nКонтекст предыдущего диалога:\n{history_text}\n\nЕсли вопрос относится к тому, что обсуждалось ранее, используй эту информацию для ответа."
+                
+                # Отправляем запрос в vision модель с контекстом
+                response = self.vision_model.generate_content([
+                    enhanced_question,
+                    image
+                ])
+            else:
+                # Обычный запрос без истории
+                response = self.vision_model.generate_content([
+                    user_question,
+                    image
+                ])
             
             return response.text if response.text else "Не удалось проанализировать изображение."
         except Exception as e:
@@ -241,9 +260,9 @@ class GeminiClient:
             print(f"Ошибка при обработке аудио: {e}")
             return f"Произошла ошибка при обработке аудио: {str(e)}"
     
-    def generate_image(self, prompt: str, reference_image: Optional[bytes] = None) -> Optional[bytes]:
+    async def generate_image(self, prompt: str, reference_image: Optional[bytes] = None) -> Optional[bytes]:
         """
-        Генерация изображения через Imagen (nanoBanana)
+        Генерация изображения через gemini-2.5-flash-image напрямую (без посредничества)
         
         Args:
             prompt: Текстовое описание изображения
@@ -253,176 +272,161 @@ class GeminiClient:
             Байты сгенерированного изображения или None при ошибке
         """
         try:
+            from google import genai as new_genai
+            from google.genai import types
             import base64
-            import traceback
             
-            # Используем Imagen модель для генерации
-            # Проверяем, доступна ли модель imagen в конфиге
-            imagen_config = config.GEMINI_MODELS.get('imagen')
-            if not imagen_config or not imagen_config.get('available', False):
-                print(f"[Генерация изображений] Модель Imagen недоступна в конфиге")
+            # Используем сохраненный API ключ из конструктора
+            api_key = self.api_key
+            
+            if not api_key:
+                print("[Генерация изображений] API ключ не найден")
                 return None
             
-            # Создаем модель Imagen
-            imagen_model_name = imagen_config['name']
-            print(f"[Генерация изображений] Используется модель: {imagen_model_name}")
+            # Создаем клиент с новой библиотекой
+            client = new_genai.Client(api_key=api_key)
+            
+            # Определяем модель для генерации изображений
+            # Используем специальную модель для генерации изображений из конфига
+            model = None
+            if 'image-generation' in config.GEMINI_MODELS:
+                model = config.GEMINI_MODELS['image-generation']['name']
+            else:
+                # Fallback на хардкод, если модель не найдена в конфиге
+                model = "gemini-2.0-flash-image-generation"
+            
+            print(f"[Генерация изображений] Используется модель: {model}")
             print(f"[Генерация изображений] Промпт: {prompt}")
             
-            try:
-                imagen_model = genai.GenerativeModel(imagen_model_name)
-            except Exception as e:
-                print(f"[Генерация изображений] Ошибка создания модели: {e}")
-                print(traceback.format_exc())
-                return None
-            
-            # Формируем промпт с generation_config для изображений
-            try:
-                # Конфигурация для генерации изображения
-                generation_config = genai.types.GenerationConfig(
-                    response_mime_type="image/png"  # Указываем, что хотим получить изображение
-                )
+            # Формируем содержимое запроса
+            # Если есть референсное изображение, добавляем его
+            if reference_image:
+                # Определяем MIME тип изображения
+                image_mime = "image/png"  # По умолчанию
+                # Пробуем определить по первым байтам
+                if reference_image.startswith(b'\xff\xd8'):
+                    image_mime = "image/jpeg"
+                elif reference_image.startswith(b'\x89PNG'):
+                    image_mime = "image/png"
                 
-                if reference_image:
-                    # Если есть референсное изображение, используем мультимодальный запрос
-                    image = Image.open(BytesIO(reference_image))
-                    parts = [
-                        prompt,
-                        image
-                    ]
-                    print(f"[Генерация изображений] Отправка запроса с референсным изображением")
-                    response = imagen_model.generate_content(
-                        parts,
-                        generation_config=generation_config
-                    )
-                else:
-                    # Только текстовый промпт
-                    print(f"[Генерация изображений] Отправка текстового запроса")
-                    response = imagen_model.generate_content(
-                        prompt,
-                        generation_config=generation_config
-                    )
-            except Exception as e:
-                error_str = str(e)
-                # Проверяем ошибку квоты (429)
-                if "429" in error_str or "quota" in error_str.lower() or "Quota exceeded" in error_str:
-                    print(f"[Генерация изображений] Превышена квота API: {error_str}")
-                    # Извлекаем время ожидания из ошибки если есть
-                    import re
-                    retry_match = re.search(r'Please retry in ([\d.]+)s', error_str)
-                    if retry_match:
-                        retry_seconds = float(retry_match.group(1))
-                        raise Exception(f"Превышен лимит запросов. Попробуйте через {int(retry_seconds)} секунд.")
-                    else:
-                        raise Exception("Превышен лимит запросов для генерации изображений. Попробуйте позже.")
-                print(f"[Генерация изображений] Ошибка при генерации контента: {e}")
-                print(traceback.format_exc())
-                return None
-            
-            print(f"[Генерация изображений] Получен ответ от API")
-            print(f"[Генерация изображений] Тип response: {type(response)}")
-            
-            # При использовании response_mime_type="image/png" изображение возвращается в response.parts[0].inline_data.data
-            # Проверяем сначала это
-            if hasattr(response, 'parts') and response.parts:
-                print(f"[Генерация изображений] Найден response.parts, количество: {len(response.parts)}")
-                for i, part in enumerate(response.parts):
-                    print(f"[Генерация изображений] Часть {i}: {type(part)}")
-                    if hasattr(part, 'inline_data') and part.inline_data:
-                        print(f"[Генерация изображений] Найдено inline_data в части {i}")
-                        if hasattr(part.inline_data, 'data'):
-                            print(f"[Генерация изображений] Извлечение base64 данных")
-                            image_data = base64.b64decode(part.inline_data.data)
-                            print(f"[Генерация изображений] Изображение извлечено из parts[{i}], размер: {len(image_data)}")
-                            return image_data
-                        elif hasattr(part.inline_data, 'mime_type'):
-                            print(f"[Генерация изображений] MIME тип: {part.inline_data.mime_type}")
-            
-            # Получаем изображение из ответа
-            # Проверяем прямой атрибут image (Gemini 2.5 Flash Image)
-            if hasattr(response, 'image') and response.image:
+                # Кодируем изображение в base64 для inline_data
+                image_base64 = base64.b64encode(reference_image).decode('utf-8')
+                
+                # Создаем части с текстом и изображением через inline_data
+                parts_list = [types.Part.from_text(text=prompt)]
+                
+                # Пробуем использовать from_bytes, если доступен, иначе через inline_data
                 try:
-                    print(f"[Генерация изображений] Найден атрибут response.image")
-                    # Если это байты, возвращаем напрямую
-                    if isinstance(response.image, bytes):
-                        print(f"[Генерация изображений] Изображение в формате bytes, размер: {len(response.image)}")
-                        return response.image
-                    # Если это объект с данными, пробуем извлечь
-                    if hasattr(response.image, 'data'):
-                        print(f"[Генерация изображений] Извлечение данных из response.image.data")
-                        return response.image.data
-                except Exception as e:
-                    print(f"[Генерация изображений] Ошибка при извлечении изображения из response.image: {e}")
+                    # Попробуем использовать from_bytes (если такой метод есть)
+                    image_part = types.Part.from_bytes(data=reference_image, mime_type=image_mime)
+                    parts_list.append(image_part)
+                except (AttributeError, TypeError):
+                    # Если from_bytes не доступен, используем inline_data напрямую
+                    inline_data_part = types.Part(
+                        inline_data=types.Blob(
+                            data=image_base64,
+                            mime_type=image_mime
+                        )
+                    )
+                    parts_list.append(inline_data_part)
+                
+                contents = [
+                    types.Content(
+                        role="user",
+                        parts=parts_list,
+                    ),
+                ]
+            else:
+                # Только текстовый промпт
+                contents = [
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_text(text=prompt),
+                        ],
+                    ),
+                ]
             
-            # Проверяем candidates и parts (стандартный формат Gemini)
-            if response.candidates and len(response.candidates) > 0:
-                candidate = response.candidates[0]
-                print(f"[Генерация изображений] Проверка candidates, найдено: {len(response.candidates)}")
-                if candidate.content and candidate.content.parts:
-                    print(f"[Генерация изображений] Проверка parts, найдено: {len(candidate.content.parts)}")
-                    for i, part in enumerate(candidate.content.parts):
-                        print(f"[Генерация изображений] Часть {i}: {type(part)}")
-                        # Проверяем inline_data
-                        if hasattr(part, 'inline_data') and part.inline_data:
-                            print(f"[Генерация изображений] Найдено inline_data")
-                            if hasattr(part.inline_data, 'data'):
-                                # Декодируем base64 изображение
-                                print(f"[Генерация изображений] Декодирование base64 изображения")
-                                image_data = base64.b64decode(part.inline_data.data)
-                                print(f"[Генерация изображений] Изображение извлечено, размер: {len(image_data)}")
-                                return image_data
-                            elif hasattr(part.inline_data, 'mime_type'):
-                                print(f"[Генерация изображений] MIME тип: {part.inline_data.mime_type}")
-                        # Проверяем атрибут image
-                        elif hasattr(part, 'image') and part.image:
-                            print(f"[Генерация изображений] Найден атрибут part.image")
-                            if hasattr(part.image, 'data'):
-                                image_data = base64.b64decode(part.image.data)
-                                print(f"[Генерация изображений] Изображение извлечено из part.image, размер: {len(image_data)}")
-                                return image_data
-                            elif isinstance(part.image, bytes):
-                                print(f"[Генерация изображений] Изображение в формате bytes, размер: {len(part.image)}")
-                                return part.image
-                        # Проверяем текст (может содержать base64)
-                        elif hasattr(part, 'text') and part.text:
-                            print(f"[Генерация изображений] Найден текст в части: {part.text[:100] if len(part.text) > 100 else part.text}")
+            # Конфигурация для генерации изображения и текста
+            generate_content_config = types.GenerateContentConfig(
+                response_modalities=[
+                    "IMAGE",
+                    "TEXT",
+                ],
+            )
             
-            # Проверяем response.text напрямую
-            if hasattr(response, 'text') and response.text:
-                print(f"[Генерация изображений] Найден response.text: {response.text[:100] if len(response.text) > 100 else response.text}")
+            # Генерируем контент через streaming API
+            # Обертываем в executor, так как это синхронная операция, которая может блокировать event loop
+            import asyncio
+            image_data = None
             
-            # Дополнительные проверки - может быть изображение в другом формате
-            print("[Генерация изображений] Не удалось извлечь изображение стандартными методами")
-            print(f"[Генерация изображений] Структура ответа: candidates={bool(response.candidates)}, text={bool(getattr(response, 'text', None))}")
+            def _generate_stream():
+                """Синхронная функция для генерации через streaming"""
+                chunks = []
+                for chunk in client.models.generate_content_stream(
+                    model=model,
+                    contents=contents,
+                    config=generate_content_config,
+                ):
+                    chunks.append(chunk)
+                return chunks
             
-            # Пробуем получить весь response как строку для отладки
-            try:
-                response_str = str(response)
-                print(f"[Генерация изображений] Полный ответ (первые 500 символов): {response_str[:500]}")
-            except:
-                pass
+            # Запускаем в executor, чтобы не блокировать event loop
+            chunks = await asyncio.to_thread(_generate_stream)
             
-            # Проверяем, может быть изображение возвращается через другой API метод
-            # Для Gemini 2.5 Flash Image может потребоваться специальный метод
-            try:
-                # Проверяем, есть ли в response методы для получения изображения
-                if hasattr(response, 'parts'):
-                    print(f"[Генерация изображений] Найден response.parts")
-                    for part in response.parts:
-                        if hasattr(part, 'inline_data'):
-                            print(f"[Генерация изображений] Найдено inline_data в parts")
-                            if hasattr(part.inline_data, 'data'):
-                                image_data = base64.b64decode(part.inline_data.data)
-                                print(f"[Генерация изображений] Изображение извлечено из response.parts, размер: {len(image_data)}")
-                                return image_data
-            except Exception as e:
-                print(f"[Генерация изображений] Ошибка при проверке response.parts: {e}")
+            for chunk in chunks:
+                # Проверяем наличие кандидатов и контента
+                if (
+                    chunk.candidates is None
+                    or chunk.candidates[0].content is None
+                    or chunk.candidates[0].content.parts is None
+                ):
+                    continue
+                
+                # Проверяем inline_data (изображение)
+                part = chunk.candidates[0].content.parts[0]
+                if part.inline_data and part.inline_data.data:
+                    # Извлекаем изображение из chunk
+                    data_buffer = part.inline_data.data
+                    # data уже в байтах (не base64), но проверяем
+                    if isinstance(data_buffer, str):
+                        # Если это base64 строка, декодируем
+                        image_data = base64.b64decode(data_buffer)
+                    else:
+                        # Если уже байты, используем напрямую
+                        image_data = data_buffer
+                    
+                    print(f"[Генерация изображений] Изображение получено, размер: {len(image_data) if image_data else 0}")
+                    # Возвращаем первое найденное изображение
+                    if image_data:
+                        return image_data
+                else:
+                    # Текстовый ответ (может быть комментарий от модели)
+                    if hasattr(part, 'text') and part.text:
+                        print(f"[Генерация изображений] Текстовая часть: {part.text[:100]}")
             
-            print("[Генерация изображений] Итог: Не удалось извлечь изображение из ответа Imagen")
-            return None
+            # Если изображение не найдено в потоке, возвращаем None
+            if not image_data:
+                print("[Генерация изображений] Изображение не найдено в ответе")
+            
+            return image_data
             
         except Exception as e:
-            print(f"[Генерация изображений] Критическая ошибка: {e}")
+            error_str = str(e)
+            print(f"[Генерация изображений] Ошибка: {e}")
             import traceback
             print(traceback.format_exc())
+            
+            # Проверяем ошибку квоты (429)
+            if "429" in error_str or "quota" in error_str.lower() or "Quota exceeded" in error_str:
+                # Извлекаем время ожидания из ошибки если есть
+                import re
+                retry_match = re.search(r'Please retry in ([\d.]+)s', error_str)
+                if retry_match:
+                    retry_seconds = float(retry_match.group(1))
+                    raise Exception(f"Превышен лимит запросов. Попробуйте через {int(retry_seconds)} секунд.")
+                else:
+                    raise Exception("Превышен лимит запросов для генерации изображений. Попробуйте позже.")
+            
             return None
 

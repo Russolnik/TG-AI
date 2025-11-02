@@ -3,6 +3,7 @@ python-telegram-bot>=21.7
 
 # AI & ML
 google-generativeai>=0.3.2
+google-genai>=1.0.0
 
 # Database (версия с поддержкой httpx 0.26+)
 supabase==2.17.0

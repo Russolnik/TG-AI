@@ -8,12 +8,19 @@ from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMar
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 import re
+import os
+import base64
+import mimetypes
+from io import BytesIO
 import config
 from database import Database
 from api_key_manager import APIKeyManager
 from gemini_client import GeminiClient
 from handlers import ContentHandlers
 from uuid import UUID
+from typing import Optional
+from google import genai as new_genai
+from google.genai import types
 
 # Настройка логирования
 logging.basicConfig(
@@ -40,6 +47,222 @@ def get_handlers_for_user(telegram_id: int) -> ContentHandlers:
     
     gemini = GeminiClient(api_key, model_name)
     return ContentHandlers(db, gemini)
+
+async def generate_voice_response(api_key: str, text: str, model_name: str) -> Optional[bytes]:
+    """
+    Генерация голосового ответа через голосовую модель Gemini
+    
+    Args:
+        api_key: API ключ Gemini
+        text: Текст для озвучивания
+        model_name: Имя голосовой модели
+    
+    Returns:
+        Байты аудио файла или None при ошибке
+    """
+    try:
+        from google import genai as new_genai
+        from google.genai import types
+        import asyncio
+        
+        client = new_genai.Client(api_key=api_key)
+        
+        contents = [
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=text)],
+            ),
+        ]
+        
+        # Конфигурация для генерации аудио
+        generate_content_config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+        )
+        
+        def _generate_audio():
+            """Синхронная функция для генерации аудио"""
+            chunks = []
+            for chunk in client.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+                config=generate_content_config,
+            ):
+                chunks.append(chunk)
+            return chunks
+        
+        # Запускаем в executor
+        chunks = await asyncio.to_thread(_generate_audio)
+        
+        # Обрабатываем chunks для извлечения аудио
+        audio_data = None
+        for chunk in chunks:
+            if (
+                chunk.candidates is None
+                or chunk.candidates[0].content is None
+                or chunk.candidates[0].content.parts is None
+            ):
+                continue
+            
+            part = chunk.candidates[0].content.parts[0]
+            
+            # Проверяем аудио данные
+            if part.inline_data and part.inline_data.data:
+                data_buffer = part.inline_data.data
+                if isinstance(data_buffer, str):
+                    audio_data = base64.b64decode(data_buffer)
+                else:
+                    audio_data = data_buffer
+                logger.info(f"[Генерация голоса] Аудио получено, размер: {len(audio_data) if audio_data else 0}")
+        
+        return audio_data
+        
+    except Exception as e:
+        logger.error(f"[Генерация голоса] Ошибка: {e}", exc_info=True)
+        return None
+
+async def generate_content_direct(api_key: str, prompt: str, reference_image: Optional[bytes] = None, user_model_key: Optional[str] = None) -> tuple[Optional[str], Optional[bytes]]:
+    """
+    Прямая генерация контента через модель для генерации изображений (без посредничества)
+    Может генерировать и текст, и изображение одновременно
+    
+    Args:
+        api_key: API ключ Gemini
+        prompt: Текстовый запрос пользователя
+        reference_image: Опциональное референсное изображение (байты)
+        user_model_key: Ключ модели пользователя из config.GEMINI_MODELS (опционально)
+    
+    Returns:
+        tuple: (текстовый ответ или None, изображение или None)
+    """
+    try:
+        # Создаем клиент с новой библиотекой
+        client = new_genai.Client(api_key=api_key)
+        
+        # Определяем модель для генерации изображений
+        # Если у пользователя выбрана модель с поддержкой генерации изображений, используем её
+        # Иначе используем специальную модель для генерации изображений
+        model = None
+        if user_model_key and user_model_key in config.GEMINI_MODELS:
+            model_config = config.GEMINI_MODELS[user_model_key]
+            if model_config.get('supports_image_generation'):
+                model = model_config['name']
+        
+        # Если не нашли модель с поддержкой генерации изображений, используем специальную модель
+        if not model:
+            if 'image-generation' in config.GEMINI_MODELS:
+                model = config.GEMINI_MODELS['image-generation']['name']
+            else:
+                # Fallback на хардкод, если модель не найдена в конфиге
+                model = "gemini-2.0-flash-image-generation"
+        
+        logger.info(f"[Прямая генерация] Используется модель: {model}")
+        
+        # Формируем содержимое запроса
+        parts_list = [types.Part.from_text(text=prompt)]
+        
+        # Если есть референсное изображение, добавляем его
+        if reference_image:
+            # Определяем MIME тип изображения
+            image_mime = "image/png"
+            if reference_image.startswith(b'\xff\xd8'):
+                image_mime = "image/jpeg"
+            elif reference_image.startswith(b'\x89PNG'):
+                image_mime = "image/png"
+            
+            # Пробуем использовать from_bytes, если доступен
+            try:
+                image_part = types.Part.from_bytes(data=reference_image, mime_type=image_mime)
+                parts_list.append(image_part)
+            except (AttributeError, TypeError):
+                # Если from_bytes не доступен, используем inline_data
+                image_base64 = base64.b64encode(reference_image).decode('utf-8')
+                try:
+                    inline_data_part = types.Part(
+                        inline_data=types.Blob(data=image_base64, mime_type=image_mime)
+                    )
+                    parts_list.append(inline_data_part)
+                except:
+                    # Альтернативный способ через URI или другой формат
+                    logger.warning("Не удалось добавить референсное изображение")
+        
+        contents = [
+            types.Content(
+                role="user",
+                parts=parts_list,
+            ),
+        ]
+        
+        # Конфигурация для генерации изображения и текста одновременно
+        generate_content_config = types.GenerateContentConfig(
+            response_modalities=["IMAGE", "TEXT"],
+        )
+        
+        # Синхронная функция для streaming
+        def _generate_stream():
+            chunks = []
+            for chunk in client.models.generate_content_stream(
+                model=model,
+                contents=contents,
+                config=generate_content_config,
+            ):
+                chunks.append(chunk)
+            return chunks
+        
+        # Запускаем в executor, чтобы не блокировать event loop
+        chunks = await asyncio.to_thread(_generate_stream)
+        
+        text_parts = []
+        image_data = None
+        
+        # Обрабатываем chunks
+        for chunk in chunks:
+            if (
+                chunk.candidates is None
+                or chunk.candidates[0].content is None
+                or chunk.candidates[0].content.parts is None
+            ):
+                continue
+            
+            part = chunk.candidates[0].content.parts[0]
+            
+            # Проверяем изображение
+            if part.inline_data and part.inline_data.data:
+                data_buffer = part.inline_data.data
+                if isinstance(data_buffer, str):
+                    image_data = base64.b64decode(data_buffer)
+                else:
+                    image_data = data_buffer
+                logger.info(f"[Прямая генерация] Изображение получено, размер: {len(image_data) if image_data else 0}")
+            
+            # Проверяем текст
+            if hasattr(part, 'text') and part.text:
+                text_parts.append(part.text)
+        
+        # Объединяем текстовые части
+        text_response = '\n'.join(text_parts) if text_parts else None
+        
+        # Логируем результат
+        logger.info(f"[Прямая генерация] Результат - текст: {bool(text_response)}, изображение: {bool(image_data)}")
+        
+        # Если не было получено ни изображения, ни текста, это ошибка
+        if not image_data and not text_response:
+            logger.warning("[Прямая генерация] Не получен ни текст, ни изображение")
+            raise Exception("Не удалось получить ответ от модели - отсутствуют и текст, и изображение")
+        
+        return (text_response, image_data)
+        
+    except Exception as e:
+        error_msg = str(e)
+        error_lower = error_msg.lower()
+        
+        # Если это ошибка квоты, передаем её дальше с дополнительной информацией
+        if any(keyword in error_lower for keyword in ["quota", "429", "resource_exhausted", "limit"]):
+            logger.error(f"[Прямая генерация] Ошибка квоты: {e}")
+            raise Exception(f"RESOURCE_EXHAUSTED: {error_msg}")
+        
+        # Для других ошибок также передаем с контекстом
+        logger.error(f"[Прямая генерация] Ошибка: {e}", exc_info=True)
+        raise
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -92,9 +315,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка в команде /start для пользователя {telegram_id}: {e}", exc_info=True)
         await update.message.reply_text(
-            f"❌ Произошла ошибка при регистрации.\n\n"
-            f"Детали: {str(e)}\n\n"
-            f"Пожалуйста, попробуйте позже или обратитесь к администратору."
+            "❌ Произошла ошибка при регистрации.\n\n"
+            "Пожалуйста, попробуйте позже или обратитесь к администратору."
         )
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,9 +353,25 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             config.GEMINI_MODELS[config.DEFAULT_MODEL]
         )
         
+        # Формируем описание моделей
+        model_descriptions = []
+        for model_key, model_info in config.GEMINI_MODELS.items():
+            if model_info['available']:
+                desc = ""
+                if model_info.get('opens_mini_app'):
+                    desc = " (Работает через Mini App)"
+                elif model_info.get('supports_voice'):
+                    desc = " (Поддерживает голосовые ответы)"
+                elif model_info.get('supports_image_generation'):
+                    desc = " (Поддерживает генерацию изображений)"
+                model_descriptions.append(f"• {model_info['display_name']}{desc}")
+        
+        description_text = "\n".join(model_descriptions) if model_descriptions else "Нет доступных моделей"
+        
         message_text = (
             f"🤖 **Выбор модели AI**\n\n"
             f"Текущая модель: **{current_model_info['display_name']}**\n\n"
+            f"**Доступные модели:**\n{description_text}\n\n"
             f"Выберите модель из списка ниже:"
         )
         
@@ -162,7 +400,7 @@ async def model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if callback_data == "model_locked":
             await query.edit_message_text(
                 "🔒 Эта модель недоступна. Требуется подписка на Google AI Pro.\n\n"
-                "Используйте бесплатные модели: Gemini 2.5 Flash или Gemini 1.5 Flash."
+                "Используйте бесплатные модели: Gemini 2.5 Flash."
             )
             return
         
@@ -182,6 +420,47 @@ async def model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
             
+            # Проверяем, требуется ли подписка для выбранной модели
+            username = query.from_user.username
+            if not model_info.get('is_free', True) and not db.has_active_subscription(telegram_id, username):
+                await query.edit_message_text(
+                    "💎 **Требуется подписка**\n\n"
+                    "Эта модель доступна только для пользователей с активной подпиской.\n\n"
+                    "Вы можете приобрести подписку через кнопку меню или команду /subscription.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            # Если модель открывает mini app, открываем его вместо смены модели
+            if model_info.get('opens_mini_app', False):
+                mini_app_mode = model_info.get('mini_app_mode', 'generation')
+                mini_app_url = config.MINI_APP_URL
+                
+                # Убираем завершающий слэш если есть
+                mini_app_url = mini_app_url.rstrip('/')
+                
+                # Добавляем параметр режима к URL
+                mini_app_url_with_mode = f"{mini_app_url}?mode={mini_app_mode}"
+                
+                # Создаем кнопку с Mini App
+                keyboard = [
+                    [InlineKeyboardButton(
+                        f"📱 Открыть {model_info['display_name']}", 
+                        web_app={"url": mini_app_url_with_mode}
+                    )]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    f"📱 **{model_info['display_name']}**\n\n"
+                    f"Эта модель работает через Mini App.\n"
+                    f"Нажмите кнопку ниже, чтобы открыть.",
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            # Для бесплатной модели просто обновляем выбор
             # Обновляем модель пользователя
             db.update_user_model(telegram_id, model_key)
             
@@ -354,10 +633,13 @@ async def params_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def setup_main_menu(message):
     """Настройка постоянного меню с кнопками"""
+    mini_app_url = get_mini_app_url()
+    main_url = f"{mini_app_url}/main.html"
+    
     keyboard = [
+        [KeyboardButton("📱 Открыть приложение", web_app={"url": main_url})],
         [KeyboardButton("🤖 Модель"), KeyboardButton("⚙️ Параметры")],
-        [KeyboardButton("➕ Новый чат")],
-        [KeyboardButton("ℹ️ О проекте")]
+        [KeyboardButton("💎 Подписка"), KeyboardButton("➕ Новый чат")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await message.reply_text(
@@ -391,27 +673,37 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await model_command(update, context)
     elif text == "⚙️ Параметры":
         await params_command(update, context)
+    elif text == "💎 Подписка":
+        await subscription_command(update, context)
     elif text == "➕ Новый чат":
         await new_chat_command(update, context)
-    elif text == "ℹ️ О проекте":
-        await about_project_command(update, context)
+    elif text == "📱 Открыть приложение":
+        # Кнопка WebApp обрабатывается автоматически Telegram
+        # Можно добавить логику здесь если нужно
+        pass
 
 async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание нового чата"""
+    """Создание нового чата (старый удаляется)"""
     telegram_id = update.effective_user.id
     
     try:
-        # Получаем список всех чатов пользователя для нумерации
+        # Получаем список всех чатов пользователя
         user_chats = db.get_user_chats(telegram_id)
-        chat_number = len(user_chats) + 1
+        
+        # Удаляем все старые чаты пользователя
+        for chat in user_chats:
+            try:
+                db.delete_chat(UUID(chat['chat_id']))
+            except Exception as e:
+                logger.warning(f"Ошибка при удалении чата {chat['chat_id']}: {e}")
         
         # Создаем новый чат
-        new_chat = db.create_chat(telegram_id, f"Чат {chat_number}")
+        new_chat = db.create_chat(telegram_id, "Чат 1")
         
         if new_chat:
             await update.message.reply_text(
                 f"✅ **Новый чат создан!**\n\n"
-                f"Вы можете начать новый диалог с чистого листа.",
+                f"Старые чаты удалены. Вы можете начать новый диалог с чистого листа.",
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
@@ -420,51 +712,138 @@ async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка при создании нового чата: {e}")
         await update.message.reply_text("❌ Произошла ошибка при создании чата.")
 
-async def about_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды "О проекте" - открывает Mini App"""
+async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /subscription - информация о подписке"""
+    telegram_id = update.effective_user.id
+    
     try:
-        # Используем Mini App URL из конфига, или Netlify URL по умолчанию
-        mini_app_url = config.MINI_APP_URL
+        # Получаем текущую подписку
+        subscription = db.get_active_subscription(telegram_id)
         
-        # Если URL не установлен или это дефолтный URL, используем Netlify
-        if not mini_app_url or mini_app_url == "https://your-app.netlify.app" or "netlify.app" in mini_app_url:
-            mini_app_url = "https://yourai-bottelegram.netlify.app"
+        if subscription:
+            # Если есть активная подписка, показываем информацию
+            from datetime import datetime, timezone
+            end_date = datetime.fromisoformat(subscription['end_date'].replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+            days_left = (end_date - now).days
+            
+            message_text = (
+                f"💎 **Ваша подписка**\n\n"
+                f"• Тип: {subscription['subscription_type'].replace('_', ' ').title()}\n"
+                f"• Действует до: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
+                f"• Осталось дней: {days_left}\n\n"
+                f"✅ У вас есть доступ ко всем платным моделям."
+            )
+        else:
+            # Если нет подписки, показываем информацию о том, как приобрести
+            message_text = (
+                "💎 **Подписка**\n\n"
+                "Для доступа к платным моделям требуется подписка.\n\n"
+                "В данный момент система подписок находится в разработке.\n"
+                "Пожалуйста, обратитесь к администратору для получения доступа."
+            )
         
-        # Убираем завершающий слэш если есть
-        mini_app_url = mini_app_url.rstrip('/')
+        await update.message.reply_text(
+            message_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
         
-        # Проверяем, что URL валидный и начинается с https://
-        if not mini_app_url.startswith("https://"):
-            logger.error(f"Неверный формат MINI_APP_URL: {mini_app_url}")
-            mini_app_url = "https://yourai-bottelegram.netlify.app"
+    except Exception as e:
+        logger.error(f"Ошибка в команде /subscription: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при получении информации о подписке. Попробуйте позже."
+        )
+
+async def subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик callback для управления подпиской (отключено до реализации)"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "💎 **Подписка**\n\n"
+        "Система подписок находится в разработке.\n"
+        "Пожалуйста, обратитесь к администратору для получения доступа.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def start_subscription_report(telegram_id: int):
+    """Запустить автоматический отчет при активации подписки"""
+    try:
+        # Здесь можно добавить логику для автоматического отчета
+        # Например, отправка статистики, создание уведомления и т.д.
+        logger.info(f"[Подписка] Запуск автоматического отчета для пользователя {telegram_id}")
         
-        logger.info(f"Открытие Mini App с URL: {mini_app_url}")
+        # Пример: можно отправить уведомление пользователю через бота
+        # Для этого нужен доступ к боту, но так как функция вызывается из callback,
+        # можно использовать context или создать отдельную функцию
+        
+        # Пока просто логируем
+        subscription = db.get_active_subscription(telegram_id)
+        if subscription:
+            logger.info(f"[Подписка] Отчет: Пользователь {telegram_id} активировал подписку {subscription['subscription_type']}")
+        
+    except Exception as e:
+        logger.error(f"[Подписка] Ошибка при запуске отчета: {e}")
+
+async def about_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды "О проекте" - открывает страницу О проекте"""
+    try:
+        mini_app_url = get_mini_app_url()
+        about_url = f"{mini_app_url}/about.html"
+        
+        logger.info(f"Открытие страницы 'О проекте' с URL: {about_url}")
         
         # Создаем кнопку с Mini App
         keyboard = [
-            [InlineKeyboardButton("ℹ️ О проекте", web_app={"url": mini_app_url})]
+            [InlineKeyboardButton("ℹ️ О проекте", web_app={"url": about_url})]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Отправляем короткое сообщение с кнопкой
         await update.message.reply_text(
-            "Узнать подробнее?",
+            "📋 Страница о проекте",
             reply_markup=reply_markup
         )
     except Exception as e:
         logger.error(f"Ошибка в команде 'О проекте': {e}", exc_info=True)
-        # Даже при ошибке показываем кнопку с Netlify URL
-        try:
-            keyboard = [
-                [InlineKeyboardButton("ℹ️ О проекте", web_app={"url": "https://yourai-bottelegram.netlify.app"})]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                "Узнать подробнее?",
-                reply_markup=reply_markup
-            )
-        except:
-            await update.message.reply_text("❌ Произошла ошибка при открытии страницы.")
+        await update.message.reply_text("❌ Произошла ошибка при открытии страницы.")
+
+async def open_app_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды "Открыть приложение" - открывает главную страницу Mini App"""
+    try:
+        mini_app_url = get_mini_app_url()
+        main_url = f"{mini_app_url}/main.html"
+        
+        logger.info(f"Открытие главной страницы Mini App: {main_url}")
+        
+        # Создаем кнопку с Mini App
+        keyboard = [    
+            [InlineKeyboardButton("📱 Открыть приложение", web_app={"url": main_url})]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "🚀 Добро пожаловать в AI Assistant!\n\n"
+            "Выберите режим работы: Live общение или Генерация изображений",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в команде 'Открыть приложение': {e}", exc_info=True)
+        await update.message.reply_text("❌ Произошла ошибка при открытии приложения.")
+
+def get_mini_app_url():
+    """Получить URL Mini App с проверкой"""
+    mini_app_url = config.MINI_APP_URL
+    
+    if not mini_app_url or mini_app_url == "https://your-app.netlify.app":
+        mini_app_url = "https://yourai-bottelegram.netlify.app"
+    
+    mini_app_url = mini_app_url.rstrip('/')
+    
+    if not mini_app_url.startswith("https://"):
+        logger.error(f"Неверный формат MINI_APP_URL: {mini_app_url}")
+        mini_app_url = "https://yourai-bottelegram.netlify.app"
+    
+    return mini_app_url
 
 async def delete_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаление текущего чата и всех сообщений"""
@@ -714,17 +1093,31 @@ def is_image_generation_request(text: str) -> bool:
     
     # Ключевые слова для генерации изображений
     generation_keywords = [
+        # Русские варианты
         'сгенерируй',
+        'сгенерируй изображение',
+        'сгенерируй картинку',
+        'сгенерируй фото',
         'создай изображение',
-        'нарисуй',
-        'генерируй',
-        'generate',
-        'create image',
         'создай картинку',
+        'создай фото',
         'сделай изображение',
         'сделай картинку',
-        'сгенерируй изображение',
-        'сгенерируй картинку'
+        'сделай фото',
+        'нарисуй',
+        'генерируй',
+        'создай',
+        'сделай',
+        # Английские варианты
+        'generate',
+        'generate image',
+        'generate picture',
+        'create image',
+        'create picture',
+        'create photo',
+        'draw',
+        'make image',
+        'make picture'
     ]
     
     # Проверяем, начинается ли запрос с ключевого слова или содержит его
@@ -742,57 +1135,125 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Проверяем, является ли это запросом на генерацию изображения
         if is_image_generation_request(user_text):
-            # Получаем активный чат
-            chat_id, chat = get_active_chat_for_user(telegram_id, context)
-            if not chat_id:
-                await update.message.reply_text("❌ Ошибка при получении чата.")
+            # Получаем API ключ пользователя для прямой генерации
+            api_key = key_manager.get_user_api_key(telegram_id)
+            if not api_key:
+                await update.message.reply_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
                 return
             
             # Отправляем статус генерации
-            status_msg = await update.message.reply_text("🎨 Генерирую изображение...")
+            status_msg = await update.message.reply_text("🎨 Генерирую контент (изображение и текст)...")
             
-            # Получаем обработчики
-            user_handlers = get_handlers_for_user(telegram_id)
+            # Получаем выбранную модель пользователя
+            user_model_key = db.get_user_model(telegram_id)
             
-            # Генерируем изображение
+            # Прямая генерация через модель для генерации изображений (без посредничества)
             try:
-                generated_image = await user_handlers.handle_generate_image(user_text)
+                text_response, generated_image = await generate_content_direct(api_key, user_text, None, user_model_key)
                 
+                await status_msg.delete()
+                
+                # Получаем или создаем чат для генерации изображений
+                chat_id, chat = get_active_chat_for_user(telegram_id, context)
+                if not chat_id:
+                    # Создаем новый чат для генерации если нет активного
+                    chat = db.create_chat(telegram_id, "Генерация изображений", "generation")
+                    if chat:
+                        chat_id = UUID(chat['chat_id'])
+                        context.user_data['active_chat_id'] = str(chat_id)
+                
+                # Сохраняем запрос пользователя в БД ДО генерации
+                if chat_id:
+                    db.add_message(chat_id, "user", user_text, "generation_request")
+                
+                # Если есть изображение, отправляем его
                 if generated_image:
-                    # Отправляем сгенерированное изображение
-                    await status_msg.delete()
-                    from io import BytesIO
                     image_buffer = BytesIO(generated_image)
                     image_buffer.name = 'generated_image.png'
+                    
+                    # Если есть текстовый ответ, добавляем в caption
+                    caption = f"🎨 Изображение сгенерировано по запросу: {user_text}"
+                    if text_response:
+                        caption += f"\n\n{text_response[:500]}"  # Ограничиваем длину caption
+                    
                     await update.message.reply_photo(
                         photo=InputFile(image_buffer, filename='generated_image.png'),
-                        caption=f"🎨 Изображение сгенерировано по запросу: {user_text}"
+                        caption=caption
+                    )
+                    
+                    # Сохраняем контекст генерации в БД (только текстовый ответ, без самого изображения)
+                    context_text = f"Сгенерировано изображение по запросу: {user_text}"
+                    if text_response:
+                        context_text += f"\nОтвет модели: {text_response[:200]}"
+                    db.add_message(chat_id, "model", context_text, "generation_response")
+                    
+                    # Обновляем краткое описание контекста чата
+                    db.update_chat_context(chat_id, f"Последняя генерация: {user_text[:100]}")
+                    
+                    # Если текстовый ответ длинный, отправляем отдельным сообщением
+                    if text_response and len(text_response) > 500:
+                        await safe_send_message(update, text_response)
+                
+                # Если только текст без изображения
+                elif text_response:
+                    await safe_send_message(update, f"📝 Ответ:\n\n{text_response}")
+                    
+                    # Сохраняем ответ модели в БД
+                    db.add_message(chat_id, "model", text_response, "generation_response")
+                    
+                    # Если не было изображения, но был запрос на генерацию
+                    await update.message.reply_text(
+                        "⚠️ Изображение не было сгенерировано.\n\n"
+                        "При генерации произошла ошибка - модель вернула только текстовый ответ.\n\n"
+                        "Попробуйте еще раз или переформулируйте запрос."
                     )
                 else:
+                    # Не удалось получить ни изображение, ни текст
                     await status_msg.edit_text(
-                        "❌ Не удалось сгенерировать изображение.\n\n"
-                        "Возможные причины:\n"
-                        "• Модель генерации изображений временно недоступна\n"
-                        "• Проблема с API ключом\n"
-                        "• Неверный формат запроса\n\n"
-                        "Попробуйте еще раз через несколько секунд."
+                        "❌ **Не удалось сгенерировать изображение.**\n\n"
+                        "При генерации произошла ошибка - изображение не было создано.\n\n"
+                        "**Возможные причины:**\n"
+                        "• Сервис временно перегружен\n"
+                        "• Модель временно недоступна\n\n"
+                        "Пожалуйста, попробуйте еще раз через несколько минут."
                     )
+                    
             except Exception as e:
                 error_msg = str(e)
-                logger.error(f"Ошибка при генерации изображения: {e}", exc_info=True)
+                error_lower = error_msg.lower()
+                logger.error(f"Ошибка при прямой генерации: {e}", exc_info=True)
                 
-                # Специальная обработка ошибок квоты
-                if "Превышен лимит" in error_msg or "quota" in error_msg.lower() or "429" in error_msg:
+                # Специальная обработка ошибок квоты и лимитов
+                if any(keyword in error_lower for keyword in ["quota", "429", "resource_exhausted", "limit", "превышен", "лимит"]):
+                    # Извлекаем информацию о времени ожидания
+                    import re
+                    retry_match = re.search(r'retry.*?(\d+(?:\.\d+)?)\s*s', error_lower)
+                    retry_seconds = int(float(retry_match.group(1))) if retry_match else None
+                    
+                    retry_text = f"\n\n⏰ Попробуйте снова через {retry_seconds} секунд." if retry_seconds else "\n\n⏰ Попробуйте позже (через несколько минут)."
+                    
                     await status_msg.edit_text(
-                        "⚠️ Превышен лимит запросов для генерации изображений.\n\n"
-                        f"{error_msg}\n\n"
-                        "На бесплатном тарифе Gemini API есть ограничения на количество генераций изображений в день.\n"
-                        "Попробуйте позже или используйте другой API ключ."
+                        "⚠️ **Превышен лимит запросов для генерации изображений.**\n\n"
+                        "Сервис временно недоступен из-за высокой нагрузки.\n\n"
+                        "**Что можно сделать:**\n"
+                        "• Подождите несколько минут перед повторной попыткой\n"
+                        "• Попробуйте другой запрос\n"
+                        f"{retry_text}"
+                    )
+                elif any(keyword in error_lower for keyword in ["safety", "blocked", "harmful", "policy violation", "content policy", "safety filter"]):
+                    await status_msg.edit_text(
+                        "🚫 **Запрос заблокирован.**\n\n"
+                        "Ваш запрос был отклонен системой безопасности Gemini.\n\n"
+                        "Попробуйте переформулировать запрос или использовать другие ключевые слова."
                     )
                 else:
+                    # Общая ошибка - показываем понятное сообщение
                     await status_msg.edit_text(
-                        f"❌ Ошибка при генерации изображения: {error_msg}\n\n"
-                        "Попробуйте еще раз позже."
+                        "❌ **Произошла ошибка при генерации изображения.**\n\n"
+                        "К сожалению, не удалось сгенерировать изображение.\n\n"
+                        "**Возможные причины:**\n"
+                        "• Временная недоступность сервиса\n\n"
+                        "Пожалуйста, попробуйте еще раз через несколько минут."
                     )
             return
         
@@ -844,8 +1305,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка при получении чата.")
             return
         
-        # Сохраняем сообщение пользователя
-        db.add_message(chat_id, "user", user_text)
+        # Сохраняем сообщение пользователя (определяем тип: live или обычное)
+        # Проверяем, является ли это live чатом (можно проверить по типу чата или модели)
+        user_model = db.get_user_model(telegram_id)
+        model_info = config.GEMINI_MODELS.get(user_model, {})
+        is_live_chat = model_info.get('supports_voice', False)
+        
+        context_type = "live_message" if is_live_chat else None
+        db.add_message(chat_id, "user", user_text, context_type)
         
         # Получаем историю сообщений для контекста (исключаем медиа-сообщения)
         # Медиа обрабатывается независимо и не должно влиять на текстовые ответы
@@ -888,17 +1355,53 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Отправляем статус обработки
         status_msg = await update.message.reply_text("💬 Обрабатываю ваш вопрос...")
         
+        # Получаем API ключ для проверки голосовых моделей
+        api_key = key_manager.get_user_api_key(telegram_id)
+        
         # Получаем обработчики с правильным API-ключом
         user_handlers = get_handlers_for_user(telegram_id)
+        
+        # Получаем выбранную модель пользователя
+        model_name = db.get_user_model(telegram_id)
+        model_config = config.GEMINI_MODELS.get(model_name, config.GEMINI_MODELS[config.DEFAULT_MODEL])
+        
+        # Проверяем, поддерживает ли модель голосовые ответы
+        supports_voice = model_config.get('supports_voice', False)
         
         # Получаем ответ от Gemini
         response = user_handlers.gemini.chat(chat_history, context_window=config.CONTEXT_WINDOW_SIZE)
         
-        # Сохраняем ответ модели
-        db.add_message(chat_id, "model", response)
+        # Сохраняем ответ модели (с типом контекста если это live чат)
+        response_context_type = "live_message" if is_live_chat else None
+        db.add_message(chat_id, "model", response, response_context_type)
         
-        # Удаляем статус и отправляем ответ с форматированием
+        # Обновляем краткое описание контекста чата для live общения
+        if is_live_chat:
+            context_summary = f"Последний запрос: {user_text[:50]}{'...' if len(user_text) > 50 else ''}"
+            db.update_chat_context(chat_id, context_summary)
+        
+        # Удаляем статус
         await status_msg.delete()
+        
+        # Если модель поддерживает голос, генерируем и отправляем голосовой ответ
+        if supports_voice and api_key:
+            try:
+                # Генерируем голосовой ответ через голосовую модель
+                voice_data = await generate_voice_response(api_key, response, model_config['name'])
+                
+                if voice_data:
+                    # Отправляем голосовое сообщение
+                    voice_buffer = BytesIO(voice_data)
+                    voice_buffer.name = 'response.ogg'
+                    await update.message.reply_voice(
+                        voice=InputFile(voice_buffer, filename='response.ogg'),
+                        caption=response[:200] if len(response) > 200 else response  # Короткая подпись
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"Не удалось сгенерировать голосовой ответ: {e}, отправляем текстом")
+        
+        # Отправляем текстовый ответ с форматированием
         await safe_send_message(update, response)
         
     except Exception as e:
@@ -986,54 +1489,136 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_generation = caption and is_image_generation_request(caption)
         
         if is_generation:
-            # Генерация изображения на основе фото и текста
-            status_msg = await update.message.reply_text("🎨 Генерирую изображение на основе фото...")
+            # Генерация изображения на основе фото и текста (прямая генерация)
+            status_msg = await update.message.reply_text("🎨 Генерирую контент на основе фото...")
+            
+            # Получаем API ключ пользователя для прямой генерации
+            api_key = key_manager.get_user_api_key(telegram_id)
+            if not api_key:
+                await status_msg.edit_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
+                return
             
             # Скачиваем фото
             photo_file = await context.bot.get_file(photo.file_id)
             photo_data = await photo_file.download_as_bytearray()
             
-            # Получаем обработчики
-            user_handlers = get_handlers_for_user(telegram_id)
+            # Получаем или создаем чат для генерации изображений
+            chat_id, chat = get_active_chat_for_user(telegram_id, context)
+            if not chat_id:
+                # Создаем новый чат для генерации если нет активного
+                chat = db.create_chat(telegram_id, "Генерация изображений", "generation")
+                if chat:
+                    chat_id = UUID(chat['chat_id'])
+                    context.user_data['active_chat_id'] = str(chat_id)
             
-            # Генерируем изображение на основе референсного фото и текста
+            # Формируем текст запроса
+            request_text = caption if caption else "Создай изображение на основе этого фото"
+            
+            # Сохраняем запрос пользователя с описанием фото
+            if chat_id:
+                db.add_message(chat_id, "user", f"Генерация по фото: {request_text}", "generation_request")
+            
+            # Получаем выбранную модель пользователя
+            user_model_key = db.get_user_model(telegram_id)
+            
+            # Прямая генерация через модель для генерации изображений с референсным изображением
             try:
-                generated_image = await user_handlers.handle_generate_image(caption, bytes(photo_data))
+                text_response, generated_image = await generate_content_direct(
+                    api_key, 
+                    request_text,
+                    bytes(photo_data),
+                    user_model_key
+                )
                 
+                await status_msg.delete()
+                
+                # Если есть изображение, отправляем его
                 if generated_image:
-                    await status_msg.delete()
-                    from io import BytesIO
                     image_buffer = BytesIO(generated_image)
                     image_buffer.name = 'generated_image.png'
+                    
+                    # Если есть текстовый ответ, добавляем в caption
+                    caption_text = f"🎨 Изображение сгенерировано на основе фото и запроса: {request_text}"
+                    if text_response:
+                        caption_text += f"\n\n{text_response[:500]}"
+                    
                     await update.message.reply_photo(
                         photo=InputFile(image_buffer, filename='generated_image.png'),
-                        caption=f"🎨 Изображение сгенерировано на основе фото и запроса: {caption}"
+                        caption=caption_text
+                    )
+                    
+                    # Сохраняем контекст генерации в БД
+                    if chat_id:
+                        context_text = f"Сгенерировано изображение на основе фото и запроса: {request_text}"
+                        if text_response:
+                            context_text += f"\nОтвет модели: {text_response[:200]}"
+                        db.add_message(chat_id, "model", context_text, "generation_response")
+                        db.update_chat_context(chat_id, f"Последняя генерация: {request_text[:100]}")
+                    
+                    # Если текстовый ответ длинный, отправляем отдельным сообщением
+                    if text_response and len(text_response) > 500:
+                        await safe_send_message(update, text_response)
+                
+                # Если только текст без изображения
+                elif text_response:
+                    await safe_send_message(update, f"📝 Ответ:\n\n{text_response}")
+                    
+                    # Сохраняем ответ модели в БД
+                    if chat_id:
+                        db.add_message(chat_id, "model", text_response, "generation_response")
+                    
+                    # Если не было изображения, но был запрос на генерацию
+                    await update.message.reply_text(
+                        "⚠️ Изображение не было сгенерировано.\n\n"
+                        "Модель вернула только текстовый ответ. Попробуйте еще раз."
                     )
                 else:
+                    # Не удалось получить ни изображение, ни текст
                     await status_msg.edit_text(
-                        "❌ Не удалось сгенерировать изображение.\n\n"
-                        "Возможные причины:\n"
-                        "• Модель генерации изображений временно недоступна\n"
-                        "• Проблема с API ключом\n"
-                        "• Неверный формат запроса\n\n"
-                        "Попробуйте еще раз через несколько секунд."
+                        "❌ **Не удалось сгенерировать изображение.**\n\n"
+                        "При генерации произошла ошибка - изображение не было создано.\n\n"
+                        "**Возможные причины:**\n"
+                        "• Сервис временно перегружен\n"
+                        "• Модель временно недоступна\n\n"
+                        "Пожалуйста, попробуйте еще раз через несколько минут."
                     )
+                    
             except Exception as e:
                 error_msg = str(e)
-                logger.error(f"Ошибка при генерации изображения с фото: {e}", exc_info=True)
+                error_lower = error_msg.lower()
+                logger.error(f"Ошибка при прямой генерации с фото: {e}", exc_info=True)
                 
-                # Специальная обработка ошибок квоты
-                if "Превышен лимит" in error_msg or "quota" in error_msg.lower() or "429" in error_msg:
+                # Специальная обработка ошибок квоты и лимитов
+                if any(keyword in error_lower for keyword in ["quota", "429", "resource_exhausted", "limit", "превышен", "лимит"]):
+                    # Извлекаем информацию о времени ожидания
+                    import re
+                    retry_match = re.search(r'retry.*?(\d+(?:\.\d+)?)\s*s', error_lower)
+                    retry_seconds = int(float(retry_match.group(1))) if retry_match else None
+                    
+                    retry_text = f"\n\n⏰ Попробуйте снова через {retry_seconds} секунд." if retry_seconds else "\n\n⏰ Попробуйте позже (через несколько минут)."
+                    
                     await status_msg.edit_text(
-                        "⚠️ Превышен лимит запросов для генерации изображений.\n\n"
-                        f"{error_msg}\n\n"
-                        "На бесплатном тарифе Gemini API есть ограничения на количество генераций изображений в день.\n"
-                        "Попробуйте позже или используйте другой API ключ."
+                        "⚠️ **Превышен лимит запросов для генерации изображений.**\n\n"
+                        "Сервис временно недоступен из-за высокой нагрузки.\n\n"
+                        "**Что можно сделать:**\n"
+                        "• Подождите несколько минут перед повторной попыткой\n"
+                        "• Попробуйте другой запрос\n"
+                        f"{retry_text}"
+                    )
+                elif any(keyword in error_lower for keyword in ["safety", "blocked", "harmful", "policy violation", "content policy", "safety filter"]):
+                    await status_msg.edit_text(
+                        "🚫 **Запрос заблокирован.**\n\n"
+                        "Ваш запрос был отклонен системой безопасности Gemini.\n\n"
+                        "Попробуйте переформулировать запрос или использовать другие ключевые слова."
                     )
                 else:
+                    # Общая ошибка - показываем понятное сообщение
                     await status_msg.edit_text(
-                        f"❌ Ошибка при генерации изображения: {error_msg}\n\n"
-                        "Попробуйте еще раз позже."
+                        "❌ **Произошла ошибка при генерации изображения.**\n\n"
+                        "К сожалению, не удалось сгенерировать изображение.\n\n"
+                        "**Возможные причины:**\n"
+                        "• Временная недоступность сервиса\n\n"
+                        "Пожалуйста, попробуйте еще раз через несколько минут."
                     )
             return
         
@@ -1045,14 +1630,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file = await context.bot.get_file(photo.file_id)
         photo_data = await photo_file.download_as_bytearray()
         
+        # Сохраняем сообщение пользователя в БД (фото с подписью как одно сообщение)
+        # Если есть подпись - используем её, если нет - указываем что отправлено фото
+        user_message_text = caption if caption else "📷 [Фото]"
+        db.add_message(chat_id, "user", user_message_text)
+        
+        # Получаем историю сообщений для контекста (исключаем медиа-сообщения)
+        messages = db.get_chat_messages(chat_id, limit=config.CONTEXT_WINDOW_SIZE, exclude_media=True)
+        
+        # Формируем историю для Gemini (только role и content)
+        seen_contents = set()
+        chat_history = []
+        prev_content = None
+        for msg in messages:
+            content = msg['content']
+            # Пропускаем дубликаты и последовательные одинаковые сообщения
+            if content in seen_contents or content == prev_content:
+                continue
+            seen_contents.add(content)
+            prev_content = content
+            chat_history.append({"role": msg['role'], "content": content})
+        
         # Получаем обработчики
         user_handlers = get_handlers_for_user(telegram_id)
         
-        # Обрабатываем фото
-        response = await user_handlers.handle_photo(bytes(photo_data), caption)
+        # Обрабатываем фото с историей чата для контекста
+        response = await user_handlers.handle_photo(bytes(photo_data), caption, chat_history)
         
-        # НЕ сохраняем медиа в историю - обрабатываем независимо
-        # Это гарантирует, что следующее текстовое сообщение не будет пытаться обработать это фото снова
+        # Сохраняем ответ модели в БД
+        db.add_message(chat_id, "model", response)
         
         # Удаляем статус и отправляем ответ с форматированием
         await status_msg.delete()
@@ -1157,14 +1763,18 @@ def start_bot():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("model", model_command))
     application.add_handler(CommandHandler("params", params_command))
+    application.add_handler(CommandHandler("subscription", subscription_command))
+    application.add_handler(CommandHandler("about", about_project_command))
+    application.add_handler(CommandHandler("app", open_app_command))
     
     # Регистрируем обработчики callback
     application.add_handler(CallbackQueryHandler(model_callback, pattern="^model_"))
     application.add_handler(CallbackQueryHandler(params_callback, pattern="^param_"))
+    application.add_handler(CallbackQueryHandler(subscription_callback, pattern="^sub_"))
     
     # Регистрируем обработчики сообщений
     # Сначала обрабатываем кнопки меню (до текстовых сообщений)
-    application.add_handler(MessageHandler(filters.Regex("^(🤖 Модель|⚙️ Параметры|➕ Новый чат|ℹ️ О проекте)$"), handle_menu_button))
+    application.add_handler(MessageHandler(filters.Regex("^(🤖 Модель|⚙️ Параметры|💎 Подписка|➕ Новый чат)$"), handle_menu_button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
@@ -1173,25 +1783,45 @@ def start_bot():
     # Глобальный обработчик ошибок
     application.add_error_handler(error_handler)
     
-    # Устанавливаем команды бота
-    async def post_init(application: Application):
-        await application.bot.set_my_commands([
-            BotCommand("start", "Запустить бота и зарегистрироваться"),
-            BotCommand("model", "Выбрать модель AI (Flash/Pro)"),
-            BotCommand("params", "Настроить параметры (кастомизация)")
-        ])
+    # Устанавливаем команды бота через post_init (вызывается после инициализации)
+    async def post_init(app: Application):
+        """Установка команд бота после инициализации"""
+        try:
+            # Ждем, пока бот полностью инициализирован
+            await asyncio.sleep(0.1)
+            await app.bot.set_my_commands([
+                BotCommand("start", "Запустить бота и зарегистрироваться"),
+                BotCommand("model", "Выбрать модель AI (Flash/Pro)"),
+                BotCommand("params", "Настроить параметры (кастомизация)")
+            ])
+            logger.info("Команды бота установлены")
+        except Exception as e:
+            logger.warning(f"Не удалось установить команды бота: {e}")
     
     application.post_init = post_init
     
-    # Запускаем бота (run_polling сам управляет event loop)
-    logger.info("Бот запущен!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
+    # Запускаем бота (run_polling сам управляет event loop и инициализацией)
+    logger.info("Запуск бота...")
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False,
+            drop_pending_updates=True
+        )
+    except RuntimeError as e:
+        if "not properly initialized" in str(e):
+            import telegram
+            logger.error("Ошибка инициализации бота. Возможна проблема с версией python-telegram-bot.")
+            logger.error(f"Текущая версия: {telegram.__version__}")
+            logger.error("Попробуйте: pip install --upgrade python-telegram-bot")
+        raise
 
 def run_flask() -> None:
     """Запуск легковесного Flask приложения, требуемого для хоста Render"""
     import os
-    from flask import Flask, send_from_directory
+    from flask import Flask, send_from_directory, request, jsonify
     from pathlib import Path
+    import json
     
     print("[flask] запуск вспомогательного веб-сервера...")
     
@@ -1210,6 +1840,252 @@ def run_flask() -> None:
         """Health check endpoint для Render"""
         return "Telegram Bot is running (long polling in main thread).", 200
     
+    @app.after_request
+    def after_request(response):
+        """Добавляем CORS заголовки для работы Mini App"""
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        return response
+    
+    @app.route("/api/gemini/api-key", methods=["POST", "OPTIONS"])
+    def api_gemini_api_key():
+        """API endpoint для получения API ключа пользователя (для Live API)
+        Автоматически назначает ключ с проверкой лимита (макс 5 пользователей на ключ)
+        """
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json
+            telegram_id = data.get('telegram_id')
+            
+            if not telegram_id:
+                return jsonify({"error": "Missing telegram_id"}), 400
+            
+            # Получаем API ключ пользователя
+            api_key = key_manager.get_user_api_key(telegram_id)
+            
+            # Если ключа нет, назначаем новый (с проверкой лимита через get_available_key)
+            if not api_key:
+                key_id, api_key, status = key_manager.assign_key_to_user(telegram_id)
+                if not api_key:
+                    return jsonify({
+                        "error": "No available API keys. All keys have reached the maximum user limit (5 users per key)."
+                    }), 503
+            
+            # Возвращаем API ключ (в продакшене можно использовать временный токен)
+            return jsonify({
+                "api_key": api_key
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"[API Key] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route("/api/gemini/live", methods=["POST", "OPTIONS"])
+    def api_gemini_live():
+        """API endpoint для Live общения с Gemini"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json
+            telegram_id = data.get('telegram_id')
+            audio_base64 = data.get('audio')  # base64 encoded audio
+            
+            if not telegram_id or not audio_base64:
+                return jsonify({"error": "Missing telegram_id or audio"}), 400
+            
+            # Получаем API ключ пользователя
+            api_key = key_manager.get_user_api_key(telegram_id)
+            if not api_key:
+                return jsonify({"error": "API key not found"}), 404
+            
+            # Получаем модель пользователя - используем Live модель
+            model_key = db.get_user_model(telegram_id)
+            # Проверяем, есть ли у модели поддержка голоса
+            model_info = config.GEMINI_MODELS.get(model_key)
+            
+            # Если модель не поддерживает голос, используем Live модель
+            if not model_info or not model_info.get('supports_voice'):
+                model_info = config.GEMINI_MODELS.get('flash-live', config.GEMINI_MODELS['flash'])
+            
+            model_name = model_info.get('name', 'gemini-2.5-flash-live')
+            
+            # Декодируем аудио
+            audio_data = base64.b64decode(audio_base64)
+            
+            # Используем asyncio для вызова async функции
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                # Создаем клиент Gemini
+                client = new_genai.Client(api_key=api_key)
+                
+                # Определяем модель для Live
+                model_name = model_info.get('name', 'gemini-2.5-flash-live')
+                
+                # Формируем содержимое с аудио
+                audio_mime = "audio/webm"
+                try:
+                    audio_part = types.Part.from_bytes(data=audio_data, mime_type=audio_mime)
+                except (AttributeError, TypeError):
+                    # Fallback на inline_data
+                    audio_base64_clean = base64.b64encode(audio_data).decode('utf-8')
+                    audio_part = types.Part(
+                        inline_data=types.Blob(data=audio_base64_clean, mime_type=audio_mime)
+                    )
+                
+                contents = [
+                    types.Content(
+                        role="user",
+                        parts=[audio_part],
+                    ),
+                ]
+                
+                # Конфигурация для генерации аудио ответа
+                generate_content_config = types.GenerateContentConfig(
+                    response_modalities=["AUDIO", "TEXT"],
+                )
+                
+                # Синхронная функция для streaming
+                def _generate_stream():
+                    chunks = []
+                    try:
+                        for chunk in client.models.generate_content_stream(
+                            model=model_name,
+                            contents=contents,
+                            config=generate_content_config,
+                        ):
+                            chunks.append(chunk)
+                    except Exception as e:
+                        logger.error(f"[API Live] Ошибка генерации: {e}")
+                        raise
+                    return chunks
+                
+                # Запускаем в executor
+                chunks = loop.run_until_complete(asyncio.to_thread(_generate_stream))
+                
+                text_parts = []
+                audio_response = None
+                
+                # Обрабатываем chunks
+                for chunk in chunks:
+                    if (
+                        chunk.candidates is None
+                        or chunk.candidates[0].content is None
+                        or chunk.candidates[0].content.parts is None
+                    ):
+                        continue
+                    
+                    part = chunk.candidates[0].content.parts[0]
+                    
+                    # Проверяем аудио ответ
+                    if part.inline_data and part.inline_data.data:
+                        data_buffer = part.inline_data.data
+                        if isinstance(data_buffer, str):
+                            audio_response = base64.b64decode(data_buffer)
+                        else:
+                            audio_response = data_buffer
+                    
+                    # Проверяем текст
+                    if hasattr(part, 'text') and part.text:
+                        text_parts.append(part.text)
+                
+                response_text = '\n'.join(text_parts) if text_parts else "Ответ получен"
+                audio_base64_response = base64.b64encode(audio_response).decode('utf-8') if audio_response else None
+                
+                return jsonify({
+                    "text": response_text,
+                    "audio": audio_base64_response
+                }), 200
+                
+            except Exception as api_error:
+                logger.error(f"[API Live] Ошибка API: {api_error}", exc_info=True)
+                # Возвращаем простой текстовый ответ при ошибке
+                return jsonify({
+                    "text": "Произошла ошибка при обработке голосового сообщения. Попробуйте снова.",
+                    "audio": None
+                }), 200  # Возвращаем 200, чтобы не показывать ошибку пользователю
+            finally:
+                loop.close()
+            
+        except Exception as e:
+            logger.error(f"[API Live] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route("/api/gemini/generate", methods=["POST", "OPTIONS"])
+    def api_gemini_generate():
+        """API endpoint для генерации изображений через Gemini"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json
+            telegram_id = data.get('telegram_id')
+            prompt = data.get('prompt', '')
+            images_base64 = data.get('images', [])  # массив base64 изображений
+            
+            if not telegram_id:
+                return jsonify({"error": "Missing telegram_id"}), 400
+            
+            if not prompt and not images_base64:
+                return jsonify({"error": "Missing prompt and images"}), 400
+            
+            # Получаем API ключ пользователя
+            api_key = key_manager.get_user_api_key(telegram_id)
+            if not api_key:
+                return jsonify({"error": "API key not found"}), 404
+            
+            # Получаем модель пользователя
+            model_key = db.get_user_model(telegram_id)
+            model_info = config.GEMINI_MODELS.get(model_key, config.GEMINI_MODELS['image-generation'])
+            model_name = model_info.get('name', 'gemini-2.0-flash-image-generation')
+            
+            # Декодируем изображения если есть
+            reference_images = []
+            if images_base64:
+                for img_b64 in images_base64[:2]:  # Максимум 2 изображения
+                    img_data = base64.b64decode(img_b64)
+                    reference_images.append(img_data)
+            
+            # Вызываем функцию генерации напрямую через asyncio
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                result = loop.run_until_complete(
+                    generate_content_direct(
+                        api_key,
+                        prompt,
+                        reference_images[0] if reference_images else None,
+                        model_key if model_info.get('supports_image_generation') else 'image-generation'
+                    )
+                )
+                
+                text_response, generated_image = result
+                
+                # Кодируем изображение в base64 если есть
+                image_base64 = None
+                if generated_image:
+                    image_base64 = base64.b64encode(generated_image).decode('utf-8')
+                
+                return jsonify({
+                    "text": text_response or "Изображение сгенерировано",
+                    "image": image_base64
+                }), 200
+                
+            finally:
+                loop.close()
+            
+        except Exception as e:
+            logger.error(f"[API Generate] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
     @app.route("/<path:path>")
     def serve_static(path):
         """Отдаем статические файлы из mini_app (style.css, app.js и т.д.)"""
@@ -1224,6 +2100,7 @@ def run_flask() -> None:
     
     print(f"[flask] сервер запущен на порту {port}")
     print(f"[flask] Mini App доступен по адресу: http://0.0.0.0:{port}/")
+    print(f"[flask] API endpoints: /api/gemini/api-key, /api/gemini/live, /api/gemini/generate")
     
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 

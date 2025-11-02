@@ -22,7 +22,7 @@ class Database:
             print(f"Ошибка при получении пользователя: {e}")
             return None
     
-    def create_user(self, telegram_id: int, active_key_id: UUID, model_name: str = 'flash') -> Optional[Dict]:
+    def create_user(self, telegram_id: int, active_key_id: UUID, model_name: str = 'flash-lite') -> Optional[Dict]:
         """Создать нового пользователя"""
         try:
             data = {
@@ -53,10 +53,10 @@ class Database:
             user = self.get_user(telegram_id)
             if user and user.get('model_name'):
                 return user['model_name']
-            return 'flash'  # Модель по умолчанию
+            return 'flash-lite'  # Модель по умолчанию - Flash Lite для быстрых ответов
         except Exception as e:
             print(f"Ошибка при получении модели пользователя: {e}")
-            return 'flash'
+            return 'flash-lite'
     
     def update_user_key(self, telegram_id: int, active_key_id: UUID) -> bool:
         """Обновить API-ключ пользователя"""
@@ -126,7 +126,7 @@ class Database:
             print(f"Ошибка при получении чатов: {e}")
             return []
     
-    def create_chat(self, user_id: int, title: Optional[str] = None) -> Optional[Dict]:
+    def create_chat(self, user_id: int, title: Optional[str] = None, chat_type: Optional[str] = None) -> Optional[Dict]:
         """Создать новый чат"""
         try:
             if title is None:
@@ -139,6 +139,11 @@ class Database:
                 'user_id': user_id,
                 'title': title
             }
+            
+            # Добавляем тип чата если указан
+            if chat_type:
+                data['chat_type'] = chat_type
+            
             response = self.client.table('chats').insert(data).execute()
             return response.data[0] if response.data else None
         except Exception as e:
@@ -219,7 +224,7 @@ class Database:
             print(f"Ошибка при получении сообщений: {e}")
             return []
     
-    def add_message(self, chat_id: UUID, role: str, content: str) -> Optional[Dict]:
+    def add_message(self, chat_id: UUID, role: str, content: str, context_type: Optional[str] = None) -> Optional[Dict]:
         """Добавить сообщение в чат"""
         try:
             data = {
@@ -227,11 +232,27 @@ class Database:
                 'role': role,
                 'content': content
             }
+            
+            # Добавляем тип контекста если указан
+            if context_type:
+                data['context_type'] = context_type
+            
             response = self.client.table('messages').insert(data).execute()
             return response.data[0] if response.data else None
         except Exception as e:
             print(f"Ошибка при добавлении сообщения: {e}")
             return None
+    
+    def update_chat_context(self, chat_id: UUID, context_summary: str) -> bool:
+        """Обновить контекст чата (краткое описание)"""
+        try:
+            self.client.table('chats').update({
+                'context_summary': context_summary
+            }).eq('chat_id', str(chat_id)).execute()
+            return True
+        except Exception as e:
+            print(f"Ошибка при обновлении контекста чата: {e}")
+            return False
     
     def get_user_active_chat(self, telegram_id: int) -> Optional[Dict]:
         """Получить активный чат пользователя (первый или последний созданный)"""
@@ -299,4 +320,73 @@ class Database:
         except Exception as e:
             print(f"Ошибка при очистке параметров пользователя: {e}")
             return False
+    
+    # Методы для работы с подписками
+    def get_active_subscription(self, telegram_id: int) -> Optional[Dict]:
+        """Получить активную подписку пользователя"""
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            response = self.client.table('subscriptions').select('*').eq('user_id', telegram_id).eq('is_active', True).gte('end_date', now.isoformat()).order('end_date', desc=True).limit(1).execute()
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"Ошибка при получении подписки: {e}")
+            return None
+    
+    def create_subscription(self, telegram_id: int, subscription_type: str) -> Optional[Dict]:
+        """Создать подписку для пользователя"""
+        try:
+            from datetime import datetime, timezone, timedelta
+            
+            # Определяем срок подписки
+            months = {'1_month': 1, '3_months': 3, '6_months': 6}
+            months_count = months.get(subscription_type, 1)
+            
+            now = datetime.now(timezone.utc)
+            end_date = now + timedelta(days=months_count * 30)
+            
+            # Деактивируем старые подписки
+            self.client.table('subscriptions').update({'is_active': False}).eq('user_id', telegram_id).eq('is_active', True).execute()
+            
+            # Создаем новую подписку
+            data = {
+                'user_id': telegram_id,
+                'subscription_type': subscription_type,
+                'start_date': now.isoformat(),
+                'end_date': end_date.isoformat(),
+                'is_active': True,
+                'auto_renew': False
+            }
+            response = self.client.table('subscriptions').insert(data).execute()
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"Ошибка при создании подписки: {e}")
+            return None
+    
+    def cancel_subscription(self, telegram_id: int) -> bool:
+        """Отменить активную подписку пользователя"""
+        try:
+            self.client.table('subscriptions').update({'is_active': False, 'auto_renew': False}).eq('user_id', telegram_id).eq('is_active', True).execute()
+            return True
+        except Exception as e:
+            print(f"Ошибка при отмене подписки: {e}")
+            return False
+    
+    def has_active_subscription(self, telegram_id: int, username: Optional[str] = None) -> bool:
+        """Проверить, есть ли у пользователя активная подписка"""
+        try:
+            # Специальная проверка для @rusolnik - вечная подписка
+            if username and username.lower() == 'rusolnik':
+                return True
+            
+            # Проверяем активную подписку
+            subscription = self.get_active_subscription(telegram_id)
+            return subscription is not None
+        except Exception as e:
+            print(f"Ошибка при проверке подписки: {e}")
+            return False
+    
+    def is_user_subscribed(self, telegram_id: int, username: Optional[str] = None) -> bool:
+        """Проверить подписку (алиас для has_active_subscription)"""
+        return self.has_active_subscription(telegram_id, username)
 

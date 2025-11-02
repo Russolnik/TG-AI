@@ -27,32 +27,46 @@ MINI_APP_URL = os.getenv("MINI_APP_URL", "https://your-app.netlify.app")
 # Gemini Models Configuration
 # Доступные модели Gemini
 GEMINI_MODELS = {
+    'flash-lite': {
+        'name': 'gemini-2.5-flash-lite',
+        'vision_name': 'gemini-2.5-flash-lite',
+        'display_name': 'Gemini 2.5 Flash Lite (Быстрые ответы, бесплатно)',
+        'available': True,
+        'is_free': True,
+        'opens_mini_app': False  # Работает в Telegram
+    },
     'flash': {
         'name': 'gemini-2.5-flash',
         'vision_name': 'gemini-2.5-flash',
         'display_name': 'Gemini 2.5 Flash (Бесплатно)',
         'available': True,
-        'is_free': True
-    },
-    'pro': {
-        'name': 'gemini-2.5-pro',
-        'vision_name': 'gemini-2.5-pro',
-        'display_name': 'Gemini 2.5 Pro (Требуется подписка)',
-        'available': False,  # Пока заблокировано
-        'is_free': False
-    },
-    'imagen': {
-        'name': 'gemini-2.5-flash-image',  # Imagen nanoBanana для генерации изображений
-        'vision_name': 'gemini-2.5-flash',
-        'display_name': 'Imagen (Генерация изображений)',
-        'available': True,
         'is_free': True,
-        'is_image_generation': True
+        'opens_mini_app': False  # Работает в Telegram
+    },
+    'flash-live': {
+        'name': 'gemini-2.5-flash-lite',
+        'vision_name': 'gemini-2.5-flash-lite',
+        'display_name': 'Gemini 2.5 Flash Lite (Голосовой, требуется подписка)',
+        'available': True,
+        'is_free': False,
+        'supports_voice': True,
+        'opens_mini_app': True,  # Открывает mini app
+        'mini_app_mode': 'live'  # Режим в mini app
+    },
+    'image-generation': {
+        'name': 'gemini-2.0-flash-image-generation',
+        'vision_name': 'gemini-2.0-flash-image-generation',
+        'display_name': 'Gemini 2.0 Flash Image Generation (Генерация изображений, требуется подписка)',
+        'available': True,
+        'is_free': False,
+        'supports_image_generation': True,
+        'opens_mini_app': True,  # Открывает mini app
+        'mini_app_mode': 'generation'  # Режим в mini app
     }
 }
 
-# Модель по умолчанию
-DEFAULT_MODEL = 'flash'
+# Модель по умолчанию - Flash Lite для быстрых ответов
+DEFAULT_MODEL = 'flash-lite'
 
 # Максимальный размер файла: 200 МБ
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 МБ в байтах

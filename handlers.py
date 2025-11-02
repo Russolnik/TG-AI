@@ -48,20 +48,21 @@ class ContentHandlers:
             print(f"Ошибка при обработке голоса: {e}")
             return f"Произошла ошибка при обработке голосового сообщения: {str(e)}"
     
-    async def handle_photo(self, photo_data: bytes, user_caption: Optional[str] = None) -> str:
+    async def handle_photo(self, photo_data: bytes, user_caption: Optional[str] = None, chat_history: Optional[List[Dict]] = None) -> str:
         """
         Обработка фотографии
         
         Args:
             photo_data: Байты изображения
             user_caption: Подпись пользователя к фото
+            chat_history: История чата для контекста
         
         Returns:
             Ответ от Gemini Vision
         """
         try:
             question = user_caption if user_caption else "Что на этом изображении? Опишите подробно."
-            response = self.gemini.analyze_image(photo_data, question)
+            response = self.gemini.analyze_image(photo_data, question, chat_history)
             return f"📷 Анализ изображения:\n\n{response}"
         except Exception as e:
             print(f"Ошибка при обработке фото: {e}")
@@ -195,7 +196,7 @@ class ContentHandlers:
     
     async def handle_generate_image(self, prompt: str, reference_image: Optional[bytes] = None) -> Optional[bytes]:
         """
-        Генерация изображения через Imagen
+        Генерация изображения через gemini-2.5-flash-image (прямой вызов без посредничества)
         
         Args:
             prompt: Текстовое описание изображения
@@ -205,7 +206,8 @@ class ContentHandlers:
             Байты сгенерированного изображения или None при ошибке
         """
         try:
-            image_data = self.gemini.generate_image(prompt, reference_image)
+            # Вызываем асинхронный метод генерации
+            image_data = await self.gemini.generate_image(prompt, reference_image)
             return image_data
         except Exception as e:
             print(f"Ошибка при генерации изображения: {e}")
