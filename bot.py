@@ -2057,6 +2057,32 @@ def run_flask() -> None:
             logger.error(f"[API Key] Ошибка: {e}", exc_info=True)
             return jsonify({"error": str(e), "success": False}), 500
     
+    @app.route("/api/gemini/ws-proxy-info", methods=["GET", "OPTIONS"])
+    def api_ws_proxy_info():
+        """Возвращает информацию о WebSocket прокси для клиента"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            # Получаем API ключ из query параметров
+            api_key = request.args.get('api_key')
+            if not api_key:
+                return jsonify({"error": "API key required"}), 400
+            
+            # Возвращаем URL для WebSocket прокси
+            # Клиент будет подключаться к этому URL, а сервер проксирует к Google
+            base_url = request.url_root.rstrip('/')
+            ws_proxy_url = base_url.replace('http://', 'ws://').replace('https://', 'wss://') + '/api/gemini/ws-proxy'
+            
+            return jsonify({
+                "ws_proxy_url": ws_proxy_url,
+                "api_key_masked": api_key[:10] + "..." if len(api_key) > 10 else "***"
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"[WS Proxy Info] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
     @app.route("/api/gemini/live", methods=["POST", "OPTIONS"])
     def api_gemini_live():
         """API endpoint для Live общения с Gemini"""
