@@ -267,9 +267,31 @@ async def generate_content_direct(api_key: str, prompt: str, reference_image: Op
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     telegram_id = update.effective_user.id
+    user = update.effective_user
+    
+    # Получаем данные пользователя из Telegram
+    username = user.username if hasattr(user, 'username') and user.username else None
+    first_name = user.first_name if hasattr(user, 'first_name') and user.first_name else None
+    # Получаем фото профиля (если доступно)
+    photo_url = None
+    try:
+        # Получаем фото профиля пользователя через get_user_profile_photos
+        profile_photos = await context.bot.get_user_profile_photos(telegram_id, limit=1)
+        if profile_photos and profile_photos.photos:
+            # Берем самое большое фото
+            photo = profile_photos.photos[0][-1]  # Последний элемент - самое большое фото
+            photo_file = await context.bot.get_file(photo.file_id)
+            # Формируем URL для доступа к фото
+            photo_url = f"https://api.telegram.org/file/bot{context.bot.token}/{photo_file.file_path}"
+    except Exception as e:
+        logger.warning(f"Не удалось получить фото пользователя {telegram_id}: {e}")
     
     try:
-        key_id, api_key, status = key_manager.assign_key_to_user(telegram_id)
+        # Получаем или назначаем ключ пользователю (с данными профиля)
+        key_id, api_key, status = key_manager.assign_key_to_user(telegram_id, 
+                                                                 username=username, 
+                                                                 first_name=first_name, 
+                                                                 photo_url=photo_url)
         
         if status == "limit_exceeded":
             await update.message.reply_text(
@@ -313,7 +335,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await setup_main_menu(update.message)
         
     except Exception as e:
-        logger.error(f"Ошибка в команде /start для пользователя {telegram_id}: {e}", exc_info=True)
+        masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+        logger.error(f"Ошибка в команде /start для пользователя {masked_id}: {str(e)}")
         await update.message.reply_text(
             "❌ Произошла ошибка при регистрации.\n\n"
             "Пожалуйста, попробуйте позже или обратитесь к администратору."
@@ -771,7 +794,8 @@ async def start_subscription_report(telegram_id: int):
     try:
         # Здесь можно добавить логику для автоматического отчета
         # Например, отправка статистики, создание уведомления и т.д.
-        logger.info(f"[Подписка] Запуск автоматического отчета для пользователя {telegram_id}")
+        masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+        logger.info(f"[Подписка] Запуск автоматического отчета для пользователя {masked_id}")
         
         # Пример: можно отправить уведомление пользователю через бота
         # Для этого нужен доступ к боту, но так как функция вызывается из callback,
@@ -780,7 +804,8 @@ async def start_subscription_report(telegram_id: int):
         # Пока просто логируем
         subscription = db.get_active_subscription(telegram_id)
         if subscription:
-            logger.info(f"[Подписка] Отчет: Пользователь {telegram_id} активировал подписку {subscription['subscription_type']}")
+            masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+            logger.info(f"[Подписка] Отчет: Пользователь {masked_id} активировал подписку {subscription['subscription_type']}")
         
     except Exception as e:
         logger.error(f"[Подписка] Ошибка при запуске отчета: {e}")
@@ -816,7 +841,7 @@ async def open_app_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Открытие главной страницы Mini App: {main_url}")
         
         # Создаем кнопку с Mini App
-        keyboard = [    
+        keyboard = [
             [InlineKeyboardButton("📱 Открыть приложение", web_app={"url": main_url})]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -824,8 +849,8 @@ async def open_app_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🚀 Добро пожаловать в AI Assistant!\n\n"
             "Выберите режим работы: Live общение или Генерация изображений",
-            reply_markup=reply_markup
-        )
+                reply_markup=reply_markup
+            )
     except Exception as e:
         logger.error(f"Ошибка в команде 'Открыть приложение': {e}", exc_info=True)
         await update.message.reply_text("❌ Произошла ошибка при открытии приложения.")
@@ -1051,9 +1076,11 @@ async def warmup_gemini_with_params(telegram_id: int, param_text: str):
         # Делаем простой запрос с параметрами для "разогрева"
         warmup_message = f"[Контекст пользователя: {param_text}]\n\nПривет, это тестовое сообщение."
         response = gemini.chat([{"role": "user", "content": warmup_message}])
-        logger.info(f"Фоновый запрос для пользователя {telegram_id} выполнен успешно")
+        masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+        logger.info(f"Фоновый запрос для пользователя {masked_id} выполнен успешно")
     except Exception as e:
-        logger.error(f"Ошибка фонового запроса для пользователя {telegram_id}: {e}")
+        masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+        logger.error(f"Ошибка фонового запроса для пользователя {masked_id}")
         # Не показываем ошибку пользователю, это фоновый процесс
 
 async def params_command_callback(query, telegram_id: int):
@@ -1790,10 +1817,10 @@ def start_bot():
             # Ждем, пока бот полностью инициализирован
             await asyncio.sleep(0.1)
             await app.bot.set_my_commands([
-                BotCommand("start", "Запустить бота и зарегистрироваться"),
-                BotCommand("model", "Выбрать модель AI (Flash/Pro)"),
-                BotCommand("params", "Настроить параметры (кастомизация)")
-            ])
+            BotCommand("start", "Запустить бота и зарегистрироваться"),
+            BotCommand("model", "Выбрать модель AI (Flash/Pro)"),
+            BotCommand("params", "Настроить параметры (кастомизация)")
+        ])
             logger.info("Команды бота установлены")
         except Exception as e:
             logger.warning(f"Не удалось установить команды бота: {e}")
@@ -1843,10 +1870,110 @@ def run_flask() -> None:
     @app.after_request
     def after_request(response):
         """Добавляем CORS заголовки для работы Mini App"""
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        # Разрешаем все источники (в продакшене можно ограничить)
+        origin = request.headers.get('Origin')
+        if origin:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        else:
+            response.headers.add('Access-Control-Allow-Origin', '*')
+        
+        # Полный набор заголовков для CORS
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE, PATCH')
+        response.headers.add('Access-Control-Max-Age', '3600')
         return response
+    
+    @app.route("/api/user/data", methods=["POST", "OPTIONS"])
+    def api_user_data():
+        """API endpoint для получения данных пользователя из Supabase"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json or {}
+            telegram_id = data.get('telegram_id')
+            
+            if not telegram_id:
+                return jsonify({"error": "Missing telegram_id"}), 400
+            
+            # Получаем данные пользователя из Supabase
+            user = db.get_user(telegram_id)
+            
+            if not user:
+                # Если пользователя нет, возвращаем только базовые данные
+                return jsonify({
+                    "user": None,
+                    "exists": False
+                }), 200
+            
+            # Возвращаем данные пользователя (включая данные профиля)
+            return jsonify({
+                "user": {
+                    "telegram_id": user.get('telegram_id'),
+                    "model_name": user.get('model_name'),
+                    "active_key_id": user.get('active_key_id'),
+                    "username": user.get('username'),
+                    "first_name": user.get('first_name'),
+                    "photo_url": user.get('photo_url')
+                },
+                "exists": True
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"[API User Data] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route("/api/user/subscription", methods=["POST", "OPTIONS"])
+    def api_user_subscription():
+        """API endpoint для получения статуса подписки пользователя"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json or {}
+            telegram_id = data.get('telegram_id')
+            username = data.get('username')  # Опционально, для проверки @rusolnik
+            
+            if not telegram_id:
+                return jsonify({"error": "Missing telegram_id"}), 400
+            
+            # Проверяем подписку
+            has_sub = db.has_active_subscription(telegram_id, username)
+            subscription = db.get_active_subscription(telegram_id) if has_sub else None
+            
+            # Формируем ответ
+            response_data = {
+                "has_subscription": has_sub,
+                "subscription": None
+            }
+            
+            if subscription:
+                from datetime import datetime, timezone
+                try:
+                    end_date = datetime.fromisoformat(subscription['end_date'].replace('Z', '+00:00'))
+                    now = datetime.now(timezone.utc)
+                    days_left = (end_date - now).days if end_date > now else 0
+                    
+                    response_data["subscription"] = {
+                        "type": subscription.get('subscription_type'),
+                        "end_date": subscription.get('end_date'),
+                        "days_left": days_left,
+                        "is_active": subscription.get('is_active', False),
+                        "auto_renew": subscription.get('auto_renew', False)
+                    }
+                except Exception as e:
+                    logger.warning(f"Ошибка парсинга даты подписки: {e}")
+                    response_data["subscription"] = {
+                        "type": subscription.get('subscription_type'),
+                        "is_active": subscription.get('is_active', False)
+                    }
+            
+            return jsonify(response_data), 200
+            
+        except Exception as e:
+            logger.error(f"[API Subscription] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
     
     @app.route("/api/gemini/api-key", methods=["POST", "OPTIONS"])
     def api_gemini_api_key():
@@ -1857,31 +1984,78 @@ def run_flask() -> None:
             return '', 200
         
         try:
-            data = request.json
+            data = request.json or {}
             telegram_id = data.get('telegram_id')
             
             if not telegram_id:
+                logger.error(f"[API Key] Отсутствует telegram_id в запросе")
                 return jsonify({"error": "Missing telegram_id"}), 400
+            
+            # Преобразуем в int если нужно
+            try:
+                telegram_id = int(telegram_id)
+            except (ValueError, TypeError):
+                logger.error(f"[API Key] Неверный тип telegram_id: {type(telegram_id).__name__}")
+                return jsonify({"error": f"Invalid telegram_id type: {type(telegram_id).__name__}. Expected int."}), 400
+            
+            # Маскируем telegram_id в логах
+            masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+            logger.info(f"[API Key] Запрос API ключа для пользователя: {masked_id}")
             
             # Получаем API ключ пользователя
             api_key = key_manager.get_user_api_key(telegram_id)
+            has_key = api_key is not None
+            key_length = len(api_key) if api_key else 0
+            logger.info(f"[API Key] Ключ в БД: {'найден' if has_key else 'не найден'}, длина: {key_length}")
             
             # Если ключа нет, назначаем новый (с проверкой лимита через get_available_key)
             if not api_key:
-                key_id, api_key, status = key_manager.assign_key_to_user(telegram_id)
-                if not api_key:
+                logger.info(f"[API Key] Назначаем новый ключ для пользователя: {masked_id}")
+                try:
+                    key_id, api_key, status = key_manager.assign_key_to_user(telegram_id)
+                    key_status = "получен" if api_key else "не получен"
+                    masked_new_key = f"***{api_key[-4:]}" if api_key else "отсутствует"
+                    logger.info(f"[API Key] Назначение ключа: {key_status}, статус: {status}, ключ: {masked_new_key}")
+                    
+                    if not api_key:
+                        # Проверяем причины
+                        all_keys = key_manager.db.get_all_api_keys()
+                        active_keys = [k for k in all_keys if k.get('is_active')]
+                        logger.error(f"[API Key] Нет доступных ключей. Всего: {len(all_keys)}, активных: {len(active_keys)}")
+                        
+                        return jsonify({
+                            "error": "No available API keys. All keys have reached the maximum user limit (5 users per key)."
+                        }), 503
+                    
+                    logger.info(f"[API Key] ✅ Ключ назначен пользователю: {masked_id}, статус: {status}")
+                except Exception as assign_error:
+                    logger.error(f"[API Key] Ошибка при назначении ключа: {str(assign_error)}")
                     return jsonify({
-                        "error": "No available API keys. All keys have reached the maximum user limit (5 users per key)."
-                    }), 503
+                        "error": "Failed to assign API key",
+                        "success": False
+                    }), 500
+            else:
+                logger.info(f"[API Key] ✅ Ключ найден в БД для пользователя: {masked_id}")
             
-            # Возвращаем API ключ (в продакшене можно использовать временный токен)
+            # Проверяем что ключ действительно получен
+            if not api_key or len(api_key) == 0:
+                logger.error(f"[API Key] ❌ API ключ пустой для пользователя: {masked_id}")
+                return jsonify({
+                    "error": "API key is empty",
+                    "success": False
+                }), 500
+            
+            # Маскируем API ключ в логах (показываем только последние 4 символа)
+            masked_key = f"***{api_key[-4:]}" if api_key else "отсутствует"
+            logger.info(f"[API Key] ✅ Возвращаем API ключ для пользователя: {masked_id} (ключ: {masked_key})")
             return jsonify({
-                "api_key": api_key
+                "api_key": api_key,
+                "success": True
             }), 200
             
         except Exception as e:
             logger.error(f"[API Key] Ошибка: {e}", exc_info=True)
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": str(e), "success": False}), 500
     
     @app.route("/api/gemini/live", methods=["POST", "OPTIONS"])
     def api_gemini_live():
@@ -2017,6 +2191,58 @@ def run_flask() -> None:
             logger.error(f"[API Live] Ошибка: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
     
+    @app.route("/api/chat/save", methods=["POST", "OPTIONS"])
+    def api_chat_save():
+        """API endpoint для сохранения сообщений чата в БД"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json or {}
+            telegram_id = data.get('telegram_id')
+            chat_type = data.get('chat_type', 'generation')  # 'generation' или 'live'
+            role = data.get('role')  # 'user' или 'model'
+            content = data.get('content')
+            context_type = data.get('context_type')  # 'generation_request', 'generation_response', 'live_message'
+            
+            if not telegram_id or not role or not content:
+                return jsonify({"error": "Missing required fields"}), 400
+            
+            # Получаем активный чат пользователя или создаем новый
+            from uuid import UUID
+            chat = db.get_user_active_chat(telegram_id)
+            
+            chat_id = None
+            if chat:
+                # Проверяем, подходит ли чат по типу
+                existing_chat_type = chat.get('chat_type')
+                if existing_chat_type == chat_type:
+                    chat_id = UUID(chat['chat_id'])
+            
+            if not chat_id:
+                # Создаем новый чат нужного типа
+                chat_title = "Генерация изображений" if chat_type == 'generation' else "Live общение"
+                new_chat = db.create_chat(telegram_id, chat_title, chat_type)
+                if new_chat:
+                    chat_id = UUID(new_chat['chat_id'])
+            
+            # Сохраняем сообщение
+            if chat_id:
+                db.add_message(chat_id, role, content, context_type)
+                return jsonify({
+                    "success": True,
+                    "chat_id": str(chat_id)
+                }), 200
+            else:
+                return jsonify({
+                    "error": "Failed to create or get chat",
+                    "success": False
+                }), 500
+            
+        except Exception as e:
+            logger.error(f"[API Chat Save] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e), "success": False}), 500
+    
     @app.route("/api/gemini/generate", methods=["POST", "OPTIONS"])
     def api_gemini_generate():
         """API endpoint для генерации изображений через Gemini"""
@@ -2100,7 +2326,13 @@ def run_flask() -> None:
     
     print(f"[flask] сервер запущен на порту {port}")
     print(f"[flask] Mini App доступен по адресу: http://0.0.0.0:{port}/")
-    print(f"[flask] API endpoints: /api/gemini/api-key, /api/gemini/live, /api/gemini/generate")
+    print(f"[flask] API endpoints:")
+    print(f"  - /api/user/data - данные пользователя")
+    print(f"  - /api/user/subscription - статус подписки")
+    print(f"  - /api/gemini/api-key - получение API ключа")
+    print(f"  - /api/gemini/live - Live общение")
+    print(f"  - /api/gemini/generate - генерация изображений")
+    print(f"  - /api/chat/save - сохранение сообщений чата")
     
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 

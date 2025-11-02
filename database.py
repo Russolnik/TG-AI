@@ -22,7 +22,9 @@ class Database:
             print(f"Ошибка при получении пользователя: {e}")
             return None
     
-    def create_user(self, telegram_id: int, active_key_id: UUID, model_name: str = 'flash-lite') -> Optional[Dict]:
+    def create_user(self, telegram_id: int, active_key_id: UUID, model_name: str = 'flash-lite', 
+                   username: Optional[str] = None, first_name: Optional[str] = None, 
+                   photo_url: Optional[str] = None) -> Optional[Dict]:
         """Создать нового пользователя"""
         try:
             data = {
@@ -30,11 +32,38 @@ class Database:
                 'active_key_id': str(active_key_id),
                 'model_name': model_name
             }
+            # Добавляем данные профиля если они есть
+            if username:
+                data['username'] = username
+            if first_name:
+                data['first_name'] = first_name
+            if photo_url:
+                data['photo_url'] = photo_url
+                
             response = self.client.table('users').insert(data).execute()
             return response.data[0] if response.data else None
         except Exception as e:
             print(f"Ошибка при создании пользователя: {e}")
             return None
+    
+    def update_user_profile(self, telegram_id: int, username: Optional[str] = None, 
+                           first_name: Optional[str] = None, photo_url: Optional[str] = None) -> bool:
+        """Обновить данные профиля пользователя"""
+        try:
+            update_data = {}
+            if username is not None:
+                update_data['username'] = username
+            if first_name is not None:
+                update_data['first_name'] = first_name
+            if photo_url is not None:
+                update_data['photo_url'] = photo_url
+            
+            if update_data:
+                self.client.table('users').update(update_data).eq('telegram_id', telegram_id).execute()
+            return True
+        except Exception as e:
+            print(f"Ошибка при обновлении профиля пользователя: {e}")
+            return False
     
     def update_user_model(self, telegram_id: int, model_name: str) -> bool:
         """Обновить выбранную модель пользователя"""

@@ -29,7 +29,8 @@ class APIKeyManager:
                 except Exception as e:
                     print(f"Ошибка при добавлении ключа: {e}")
     
-    def assign_key_to_user(self, telegram_id: int) -> Tuple[Optional[UUID], Optional[str], str]:
+    def assign_key_to_user(self, telegram_id: int, username: Optional[str] = None, 
+                          first_name: Optional[str] = None, photo_url: Optional[str] = None) -> Tuple[Optional[UUID], Optional[str], str]:
         """
         Назначить API-ключ пользователю
         
@@ -37,6 +38,9 @@ class APIKeyManager:
             tuple: (key_id, api_key, status_message)
             status_message: "assigned" | "limit_exceeded" | "existing_user"
         """
+        # Маскируем telegram_id в логах
+        masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+        
         # Проверяем, существует ли пользователь
         user = self.db.get_user(telegram_id)
         
@@ -51,37 +55,76 @@ class APIKeyManager:
         available_key = self.db.get_available_key()
         
         if not available_key:
+            # Проверяем есть ли вообще ключи
+            all_keys = self.db.get_all_api_keys()
+            active_keys = [k for k in all_keys if k.get('is_active')]
+            print(f"[APIKeyManager] ❌ Нет доступных ключей. Всего: {len(all_keys)}, активных: {len(active_keys)}")
+            
+            # Проверяем конфиг
+            import config
+            config_keys_count = len(config.GEMINI_API_KEYS)
+            print(f"[APIKeyManager] Ключей в конфиге: {config_keys_count}")
+            
             return None, None, "limit_exceeded"
         
         key_id = UUID(available_key['key_id'])
+        api_key = available_key.get('api_key')
+        masked_key = f"***{api_key[-4:]}" if api_key else "отсутствует"
+        print(f"[APIKeyManager] ✅ Найден доступный ключ для пользователя: {masked_id} (ключ: {masked_key})")
         
-            # Создаем или обновляем пользователя
+        # Создаем или обновляем пользователя
         if user:
             # Обновляем существующего пользователя
             self.db.update_user_key(telegram_id, key_id)
+            # Обновляем данные профиля если они переданы
+            if username is not None or first_name is not None or photo_url is not None:
+                self.db.update_user_profile(telegram_id, username=username, first_name=first_name, photo_url=photo_url)
         else:
             # Создаем нового пользователя с моделью по умолчанию
             import config
-            self.db.create_user(telegram_id, key_id, config.DEFAULT_MODEL)
+            self.db.create_user(telegram_id, key_id, config.DEFAULT_MODEL, 
+                               username=username, first_name=first_name, photo_url=photo_url)
             
             # Создаем первый чат для нового пользователя
             self.db.create_chat(telegram_id, "Чат 1")
         
-        return key_id, available_key['api_key'], "assigned"
+        print(f"[APIKeyManager] ✅ Ключ назначен пользователю: {masked_id}")
+        return key_id, api_key, "assigned"
     
     def get_user_api_key(self, telegram_id: int) -> Optional[str]:
         """Получить API-ключ пользователя"""
-        user = self.db.get_user(telegram_id)
-        if not user or not user.get('active_key_id'):
+        try:
+            # Маскируем telegram_id в логах
+            masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+            
+            user = self.db.get_user(telegram_id)
+            if not user:
+                return None
+            
+            if not user.get('active_key_id'):
+                return None
+            
+            key_id = UUID(user['active_key_id'])
+            key_data = self.db.get_api_key_by_id(key_id)
+            
+            if not key_data:
+                return None
+            
+            if not key_data.get('is_active'):
+                return None
+            
+            api_key = key_data.get('api_key')
+            if not api_key:
+                return None
+            
+            # Маскируем API ключ в логах
+            masked_key = f"***{api_key[-4:]}" if api_key else "отсутствует"
+            print(f"[APIKeyManager] ✅ Найден ключ для пользователя: {masked_id} (ключ: {masked_key})")
+            return api_key
+        except Exception as e:
+            masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+            print(f"[APIKeyManager] Ошибка для пользователя: {masked_id}")
             return None
-        
-        key_id = UUID(user['active_key_id'])
-        key_data = self.db.get_api_key_by_id(key_id)
-        
-        if key_data and key_data.get('is_active'):
-            return key_data['api_key']
-        
-        return None
     
     def deactivate_key(self, key_id: UUID) -> bool:
         """Деактивировать API-ключ"""
