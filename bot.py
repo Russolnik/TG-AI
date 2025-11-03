@@ -3665,6 +3665,72 @@ def run_flask() -> None:
             logger.error(f"[API Admin Users List] Ошибка: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
     
+    @app.route("/api/admin/trial/activate", methods=["POST", "OPTIONS"])
+    def api_admin_activate_trial():
+        """API endpoint для активации пробного периода"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json or {}
+            password = data.get('password')
+            telegram_id = data.get('telegram_id')
+            
+            if password != '240123':
+                return jsonify({"error": "Invalid password"}), 401
+            
+            if not telegram_id:
+                return jsonify({"error": "Missing telegram_id"}), 400
+            
+            telegram_id = int(telegram_id)
+            result = db.activate_trial(telegram_id)
+            
+            if result:
+                logger.info(f"[Admin] Пробный период активирован для пользователя {telegram_id}")
+                return jsonify({"success": True, "message": "Пробный период активирован"}), 200
+            else:
+                return jsonify({"error": "Не удалось активировать пробный период (возможно, уже использован)"}), 400
+                
+        except Exception as e:
+            logger.error(f"[API Admin Trial Activate] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route("/api/admin/trial/deactivate", methods=["POST", "OPTIONS"])
+    def api_admin_deactivate_trial():
+        """API endpoint для деактивации/удаления пробного периода"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        try:
+            data = request.json or {}
+            password = data.get('password')
+            telegram_id = data.get('telegram_id')
+            
+            if password != '240123':
+                return jsonify({"error": "Invalid password"}), 401
+            
+            if not telegram_id:
+                return jsonify({"error": "Missing telegram_id"}), 400
+            
+            telegram_id = int(telegram_id)
+            user = db.get_user(telegram_id)
+            
+            if not user:
+                return jsonify({"error": "Пользователь не найден"}), 404
+            
+            # Сбрасываем пробный период
+            db.client.table('users').update({
+                'trial_start': None,
+                'trial_used': False
+            }).eq('telegram_id', telegram_id).execute()
+            
+            logger.info(f"[Admin] Пробный период деактивирован для пользователя {telegram_id}")
+            return jsonify({"success": True, "message": "Пробный период деактивирован"}), 200
+                
+        except Exception as e:
+            logger.error(f"[API Admin Trial Deactivate] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
     @app.route("/api/admin/users/search", methods=["POST", "OPTIONS"])
     def api_admin_users_search():
         """API endpoint для поиска пользователя"""
@@ -3745,7 +3811,9 @@ def run_flask() -> None:
                     user_info["active_subscription"] = {
                         "subscription_id": active_subscription.get('subscription_id') or active_subscription.get('id'),
                         "type": active_subscription.get('subscription_type'),
-                        "start_date": active_subscription.get('start_date'),
+                        "created_at": active_subscription.get('created_at'),  # Дата покупки/создания
+                        "start_date": active_subscription.get('start_date'),  # Дата активации
+                        "updated_at": active_subscription.get('updated_at'),  # Дата последнего обновления
                         "end_date": active_subscription.get('end_date'),
                         "is_active": active_subscription.get('is_active', False),
                         "days_left": days_left,
