@@ -24,13 +24,17 @@ CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "20"))
 # Mini App URL (замените на ваш URL после деплоя на Netlify)
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://your-app.netlify.app")
 
+# Creator Telegram ID (для уведомлений о подписках и возвратах)
+CREATOR_TELEGRAM_ID = int(os.getenv("CREATOR_TELEGRAM_ID", "6011859172"))
+CREATOR_USERNAME = os.getenv("CREATOR_USERNAME", "rusolnik")
+
 # Gemini Models Configuration
 # Доступные модели Gemini
 GEMINI_MODELS = {
     'flash-lite': {
         'name': 'gemini-2.5-flash-lite',
         'vision_name': 'gemini-2.5-flash-lite',
-        'display_name': 'Gemini 2.5 Flash Lite (Быстрые ответы, бесплатно)',
+        'display_name': 'Gemini 2.5 Flash Lite (Быстрые ответы)',
         'available': True,
         'is_free': True,
         'opens_mini_app': False  # Работает в Telegram
@@ -38,30 +42,20 @@ GEMINI_MODELS = {
     'flash': {
         'name': 'gemini-2.5-flash',
         'vision_name': 'gemini-2.5-flash',
-        'display_name': 'Gemini 2.5 Flash (Бесплатно)',
+        'display_name': 'Gemini 2.5 Flash',
         'available': True,
         'is_free': True,
         'opens_mini_app': False  # Работает в Telegram
     },
     'flash-live': {
-        'name': 'gemini-2.5-flash-lite',
-        'vision_name': 'gemini-2.5-flash-lite',
-        'display_name': 'Gemini 2.5 Flash Lite (Голосовой, требуется подписка)',
+        'name': 'gemini-2.5-flash-live',
+        'vision_name': 'gemini-2.5-flash-live',
+        'display_name': 'Gemini 2.5 Live (Доступно с подпиской)',
         'available': True,
         'is_free': False,
         'supports_voice': True,
         'opens_mini_app': True,  # Открывает mini app
         'mini_app_mode': 'live'  # Режим в mini app
-    },
-    'image-generation': {
-        'name': 'gemini-2.0-flash-image-generation',
-        'vision_name': 'gemini-2.0-flash-image-generation',
-        'display_name': 'Gemini 2.0 Flash Image Generation (Генерация изображений, требуется подписка)',
-        'available': True,
-        'is_free': False,
-        'supports_image_generation': True,
-        'opens_mini_app': True,  # Открывает mini app
-        'mini_app_mode': 'generation'  # Режим в mini app
     }
 }
 

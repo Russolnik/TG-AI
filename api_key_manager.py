@@ -30,7 +30,8 @@ class APIKeyManager:
                     print(f"Ошибка при добавлении ключа: {e}")
     
     def assign_key_to_user(self, telegram_id: int, username: Optional[str] = None, 
-                          first_name: Optional[str] = None, photo_url: Optional[str] = None) -> Tuple[Optional[UUID], Optional[str], str]:
+                          first_name: Optional[str] = None, photo_url: Optional[str] = None,
+                          referrer_id: Optional[int] = None) -> Tuple[Optional[UUID], Optional[str], str]:
         """
         Назначить API-ключ пользователю
         
@@ -83,13 +84,86 @@ class APIKeyManager:
             # Создаем нового пользователя с моделью по умолчанию
             import config
             self.db.create_user(telegram_id, key_id, config.DEFAULT_MODEL, 
-                               username=username, first_name=first_name, photo_url=photo_url)
+                               username=username, first_name=first_name, photo_url=photo_url,
+                               referrer_id=referrer_id)
             
             # Создаем первый чат для нового пользователя
             self.db.create_chat(telegram_id, "Чат 1")
+            
+            # Если есть реферер, даем 3 дня подписки вместо пробного периода
+            masked_referrer = f"***{str(referrer_id)[-4:]}" if referrer_id else None
+            if referrer_id:
+                print(f"[Referral] 🎁 Новый пользователь {masked_id} зарегистрирован по referral от {masked_referrer}")
+                referral_reward_activated = self.db.activate_referral_reward(telegram_id, referrer_id)
+                if referral_reward_activated:
+                    print(f"[Referral] ✅ 3 дня подписки активированы для нового пользователя по referral")
+                    # Отправляем уведомление пригласившему пользователю
+                    self._notify_referrer(referrer_id, telegram_id)
+                else:
+                    print(f"[Referral] ⚠️ Не удалось активировать награду за referral")
+                    # Fallback на обычный trial если referral reward не сработал
+                    if self.db.can_use_trial(telegram_id):
+                        self.db.activate_trial(telegram_id)
+            else:
+                # Активируем пробный период для нового пользователя (без referral)
+                if self.db.can_use_trial(telegram_id):
+                    trial_activated = self.db.activate_trial(telegram_id)
+                    if trial_activated:
+                        print(f"[APIKeyManager] ✅ Пробный период активирован для нового пользователя: {masked_id}")
+                    else:
+                        print(f"[APIKeyManager] ⚠️ Не удалось активировать пробный период для: {masked_id}")
         
         print(f"[APIKeyManager] ✅ Ключ назначен пользователю: {masked_id}")
         return key_id, api_key, "assigned"
+    
+    def _notify_referrer(self, referrer_id: int, new_user_id: int):
+        """Отправить уведомление пригласившему пользователю о регистрации по его referral ссылке"""
+        try:
+            import config
+            from telegram import Bot
+            import threading
+            
+            # Получаем данные нового пользователя
+            new_user = self.db.get_user(new_user_id)
+            new_user_name = new_user.get('first_name', 'Пользователь') if new_user else 'Пользователь'
+            
+            # Получаем данные реферера
+            referrer = self.db.get_user(referrer_id)
+            if not referrer:
+                print(f"[Referral Notification] ⚠️ Реферер {referrer_id} не найден в БД")
+                return
+            
+            # Формируем сообщение для реферера
+            message = (
+                f"🎉 **Кто-то зарегистрировался по твоей referral ссылке!**\n\n"
+                f"👤 **Новый пользователь:** {new_user_name}\n"
+                f"🎁 **Твоя награда:** +3 дня подписки\n\n"
+                f"Награда будет начислена автоматически при следующей проверке подписки."
+            )
+            
+            # Отправляем уведомление в отдельном потоке, чтобы не блокировать основной процесс
+            def send_notification():
+                try:
+                    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+                    # Используем синхронную отправку через run
+                    import asyncio
+                    asyncio.run(bot.send_message(
+                        chat_id=referrer_id,
+                        text=message,
+                        parse_mode='Markdown'
+                    ))
+                    print(f"[Referral Notification] ✅ Уведомление отправлено рефереру {referrer_id}")
+                except Exception as notify_error:
+                    print(f"[Referral Notification] ❌ Ошибка отправки уведомления: {notify_error}")
+            
+            # Запускаем отправку в отдельном потоке
+            thread = threading.Thread(target=send_notification, daemon=True)
+            thread.start()
+                
+        except Exception as e:
+            print(f"[Referral Notification] ❌ Общая ошибка отправки уведомления: {e}")
+            import traceback
+            traceback.print_exc()
     
     def get_user_api_key(self, telegram_id: int) -> Optional[str]:
         """Получить API-ключ пользователя"""
@@ -153,4 +227,51 @@ class APIKeyManager:
             })
         
         return stats
+    
+    def cleanup_inactive_sessions(self, inactive_minutes: int = 10) -> int:
+        """
+        Очистить неактивные сессии - освободить ключи от пользователей, неактивных более указанного времени
+        
+        Args:
+            inactive_minutes: Количество минут неактивности для очистки (по умолчанию 10)
+        
+        Returns:
+            Количество освобожденных ключей
+        """
+        try:
+            # Получаем список неактивных пользователей
+            inactive_users = self.db.get_inactive_users(inactive_minutes)
+            
+            if not inactive_users:
+                return 0
+            
+            freed_count = 0
+            
+            for user in inactive_users:
+                telegram_id = user.get('telegram_id')
+                active_key_id = user.get('active_key_id')
+                
+                if not telegram_id or not active_key_id:
+                    continue
+                
+                # Удаляем привязку ключа к пользователю (не удаляем самого пользователя)
+                try:
+                    self.db.client.table('users').update({
+                        'active_key_id': None
+                    }).eq('telegram_id', telegram_id).execute()
+                    
+                    masked_id = f"***{str(telegram_id)[-4:]}"
+                    print(f"[Cleanup] ✅ Освобожден ключ от неактивного пользователя: {masked_id}")
+                    freed_count += 1
+                except Exception as e:
+                    print(f"[Cleanup] Ошибка при освобождении ключа для пользователя {telegram_id}: {e}")
+            
+            if freed_count > 0:
+                print(f"[Cleanup] ✅ Освобождено ключей от неактивных сессий: {freed_count}")
+            
+            return freed_count
+            
+        except Exception as e:
+            print(f"[Cleanup] Ошибка при очистке неактивных сессий: {e}")
+            return 0
 
