@@ -3397,6 +3397,9 @@ def run_flask() -> None:
         Получение аватара пользователя по telegram_id
         """
         try:
+            # Обновляем активность сессии пользователя
+            update_user_avatar_session(telegram_id)
+            
             # Ищем файл аватара в папке avatars
             # Пробуем разные расширения
             extensions = ['jpg', 'jpeg', 'png', 'webp']
@@ -3415,21 +3418,31 @@ def run_flask() -> None:
             
             if not avatar_path or not os.path.exists(avatar_path):
                 logger.warning(f"[Avatar API] Аватар не найден для пользователя {telegram_id}")
-                # Возвращаем 404
-                from flask import abort
-                return abort(404)
+                # Возвращаем 404 с CORS заголовками
+                from flask import make_response
+                response = make_response("Avatar not found", 404)
+                return response
             
             # Отправляем файл
-            from flask import send_from_directory
-            return send_from_directory(
-                AVATARS_DIR,
-                os.path.basename(avatar_path),
-                mimetype=content_type
+            from flask import send_from_directory, make_response
+            response = make_response(
+                send_from_directory(
+                    AVATARS_DIR,
+                    os.path.basename(avatar_path),
+                    mimetype=content_type
+                )
             )
+            
+            # Добавляем кэширование для аватаров (15 минут)
+            response.headers.add('Cache-Control', 'public, max-age=900')
+            
+            return response
             
         except Exception as e:
             logger.error(f"[Avatar API] Ошибка получения аватара: {e}", exc_info=True)
-            return jsonify({"error": str(e)}), 500
+            from flask import make_response
+            response = make_response(jsonify({"error": str(e)}), 500)
+            return response
     
     @app.route("/api/admin/stats", methods=["POST", "OPTIONS"])
     def api_admin_stats():
