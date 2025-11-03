@@ -239,8 +239,35 @@ def get_handlers_for_user(telegram_id: int) -> ContentHandlers:
     global handlers
     
     api_key = key_manager.get_user_api_key(telegram_id)
+    
+    # Если ключа нет, пытаемся назначить автоматически
     if not api_key:
-        raise ValueError(f"Не найден API-ключ для пользователя {telegram_id}")
+        masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+        logger.warning(f"[Handlers] ⚠️ API ключ не найден для пользователя {masked_id}, пытаемся назначить автоматически...")
+        
+        try:
+            # Получаем данные пользователя из БД если он существует
+            user = db.get_user(telegram_id)
+            username = user.get('username') if user else None
+            first_name = user.get('first_name') if user else None
+            
+            # Назначаем ключ автоматически
+            key_id, api_key, status = key_manager.assign_key_to_user(
+                telegram_id,
+                username=username,
+                first_name=first_name,
+                photo_url=None  # Аватары хранятся локально
+            )
+            
+            if api_key:
+                masked_key = f"***{api_key[-4:]}"
+                logger.info(f"[Handlers] ✅ Ключ автоматически назначен пользователю {masked_id}: {masked_key}")
+            else:
+                logger.error(f"[Handlers] ❌ Не удалось назначить ключ пользователю {masked_id}, статус: {status}")
+                raise ValueError(f"Не удалось получить API-ключ для пользователя {telegram_id}. Статус: {status}")
+        except Exception as e:
+            logger.error(f"[Handlers] ❌ Ошибка при автоматическом назначении ключа: {e}", exc_info=True)
+            raise ValueError(f"Не найден API-ключ для пользователя {telegram_id} и не удалось назначить автоматически: {str(e)}")
     
     # Получаем выбранную модель пользователя
     model_name = db.get_user_model(telegram_id)
@@ -2205,9 +2232,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Проверяем, является ли это запросом на генерацию изображения
         if is_image_generation_request(user_text):
-            # Получаем API ключ пользователя для прямой генерации
-            api_key = key_manager.get_user_api_key(telegram_id)
-            if not api_key:
+            # Получаем API ключ пользователя для прямой генерации (назначится автоматически если его нет)
+            try:
+                # Пытаемся назначить ключ автоматически если его нет
+                user_temp = db.get_user(telegram_id)
+                if not user_temp or not user_temp.get('active_key_id'):
+                    logger.warning(f"[Handle Text Generation] ⚠️ API ключ не найден, пытаемся назначить автоматически...")
+                    key_manager.assign_key_to_user(telegram_id, 
+                                                  username=user_temp.get('username') if user_temp else None,
+                                                  first_name=user_temp.get('first_name') if user_temp else None,
+                                                  photo_url=None)
+                
+                api_key = key_manager.get_user_api_key(telegram_id)
+                if not api_key:
+                    await update.message.reply_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
+                    return
+            except Exception as e:
+                logger.error(f"[Handle Text Generation] ❌ Ошибка получения API ключа: {e}")
                 await update.message.reply_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
                 return
             
@@ -2443,11 +2484,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Отправляем статус обработки
         status_msg = await update.message.reply_text("💬 Обрабатываю ваш вопрос...")
         
+        # Получаем обработчики с правильным API-ключом (ключ назначится автоматически если его нет)
+        try:
+            user_handlers = get_handlers_for_user(telegram_id)
+        except ValueError as e:
+            error_msg = str(e)
+            logger.error(f"[Handle Text] ❌ Ошибка получения API ключа: {error_msg}")
+            await status_msg.edit_text(
+                "❌ **Ошибка получения API ключа**\n\n"
+                "Не удалось получить API ключ для обработки сообщения.\n\n"
+                "Пожалуйста, используйте команду /start для активации бота."
+            )
+            return
+        
         # Получаем API ключ для проверки голосовых моделей
         api_key = key_manager.get_user_api_key(telegram_id)
-        
-        # Получаем обработчики с правильным API-ключом
-        user_handlers = get_handlers_for_user(telegram_id)
         
         # Получаем выбранную модель пользователя
         model_name = db.get_user_model(telegram_id)
@@ -2529,8 +2580,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for msg in messages
             ]
             
-            # Получаем обработчики
-            user_handlers = get_handlers_for_user(telegram_id)
+            # Получаем обработчики (ключ назначится автоматически если его нет)
+            try:
+                user_handlers = get_handlers_for_user(telegram_id)
+            except ValueError as e:
+                error_msg = str(e)
+                logger.error(f"[Handle Voice] ❌ Ошибка получения API ключа: {error_msg}")
+                await status_msg.edit_text(
+                    "❌ **Ошибка получения API ключа**\n\n"
+                    "Не удалось получить API ключ для обработки голосового сообщения.\n\n"
+                    "Пожалуйста, используйте команду /start для активации бота."
+                )
+                return
             
             # Обрабатываем голос с историей чата
             response = await user_handlers.handle_voice(voice_path, caption, chat_history)
@@ -2580,9 +2641,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Генерация изображения на основе фото и текста (прямая генерация)
             status_msg = await update.message.reply_text("🎨 Генерирую контент на основе фото...")
             
-            # Получаем API ключ пользователя для прямой генерации
-            api_key = key_manager.get_user_api_key(telegram_id)
-            if not api_key:
+            # Получаем API ключ пользователя для прямой генерации (назначится автоматически если его нет)
+            try:
+                # Пытаемся назначить ключ автоматически если его нет
+                user_temp = db.get_user(telegram_id)
+                if not user_temp or not user_temp.get('active_key_id'):
+                    logger.warning(f"[Handle Photo Generation] ⚠️ API ключ не найден, пытаемся назначить автоматически...")
+                    key_manager.assign_key_to_user(telegram_id, 
+                                                  username=user_temp.get('username') if user_temp else None,
+                                                  first_name=user_temp.get('first_name') if user_temp else None,
+                                                  photo_url=None)
+                
+                api_key = key_manager.get_user_api_key(telegram_id)
+                if not api_key:
+                    await status_msg.edit_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
+                    return
+            except Exception as e:
+                logger.error(f"[Handle Photo Generation] ❌ Ошибка получения API ключа: {e}")
                 await status_msg.edit_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
                 return
             
@@ -2758,8 +2833,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prev_content = content
             chat_history.append({"role": msg['role'], "content": content})
         
-        # Получаем обработчики
-        user_handlers = get_handlers_for_user(telegram_id)
+        # Получаем обработчики (ключ назначится автоматически если его нет)
+        try:
+            user_handlers = get_handlers_for_user(telegram_id)
+        except ValueError as e:
+            error_msg = str(e)
+            logger.error(f"[Handle Photo] ❌ Ошибка получения API ключа: {error_msg}")
+            await status_msg.edit_text(
+                "❌ **Ошибка получения API ключа**\n\n"
+                "Не удалось получить API ключ для обработки фотографии.\n\n"
+                "Пожалуйста, используйте команду /start для активации бота."
+            )
+            return
         
         # Обрабатываем фото с историей чата для контекста
         response = await user_handlers.handle_photo(bytes(photo_data), caption, chat_history)
@@ -2808,8 +2893,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Получаем подпись если есть
             caption = update.message.caption
             
-            # Получаем обработчики
-            user_handlers = get_handlers_for_user(telegram_id)
+            # Получаем обработчики (ключ назначится автоматически если его нет)
+            try:
+                user_handlers = get_handlers_for_user(telegram_id)
+            except ValueError as e:
+                error_msg = str(e)
+                logger.error(f"[Handle Document] ❌ Ошибка получения API ключа: {error_msg}")
+                await status_msg.edit_text(
+                    "❌ **Ошибка получения API ключа**\n\n"
+                    "Не удалось получить API ключ для обработки документа.\n\n"
+                    "Пожалуйста, используйте команду /start для активации бота."
+                )
+                return
             
             response = None
             
