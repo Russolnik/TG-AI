@@ -38,6 +38,51 @@ db = Database()
 key_manager = APIKeyManager(db)
 handlers = None  # Инициализируется при первом использовании
 
+# Папка для хранения аватаров
+AVATARS_DIR = os.path.join(os.path.dirname(__file__), 'avatars')
+os.makedirs(AVATARS_DIR, exist_ok=True)
+
+async def download_and_save_avatar(bot, photo_file, telegram_id: int) -> Optional[str]:
+    """
+    Скачивает и сохраняет аватар пользователя на сервере
+    
+    Args:
+        bot: Экземпляр Telegram бота
+        photo_file: File объект от Telegram
+        telegram_id: ID пользователя в Telegram
+    
+    Returns:
+        str: URL для доступа к аватару через сервер или None при ошибке
+    """
+    try:
+        # Определяем расширение файла
+        file_extension = 'jpg'  # По умолчанию JPG
+        if photo_file.file_path:
+            ext = os.path.splitext(photo_file.file_path)[1].lower()
+            if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                file_extension = ext.lstrip('.')
+        
+        # Имя файла: {telegram_id}.{extension}
+        filename = f"{telegram_id}.{file_extension}"
+        filepath = os.path.join(AVATARS_DIR, filename)
+        
+        # Скачиваем файл
+        photo_bytes = await photo_file.download_as_bytearray()
+        
+        # Сохраняем на диск (синхронно, т.к. мы уже в async контексте)
+        with open(filepath, 'wb') as f:
+            f.write(photo_bytes)
+        
+        logger.info(f"✅ Аватар сохранен для пользователя {telegram_id}: {filename}")
+        
+        # Возвращаем относительный путь (будет использоваться через endpoint)
+        # Формат: /api/avatar/{telegram_id}
+        return f"/api/avatar/{telegram_id}"
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении аватара для пользователя {telegram_id}: {e}", exc_info=True)
+        return None
+
 def validate_telegram_init_data(init_data: str, bot_token: str) -> Optional[Dict]:
     """
     Валидирует initData от Telegram WebApp
@@ -349,7 +394,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Получаем данные пользователя из Telegram
     username = user.username if hasattr(user, 'username') and user.username else None
     first_name = user.first_name if hasattr(user, 'first_name') and user.first_name else None
-    # Получаем фото профиля (если доступно)
+    # Получаем и сохраняем фото профиля (если доступно)
     photo_url = None
     try:
         # Получаем фото профиля пользователя через get_user_profile_photos
@@ -358,8 +403,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Берем самое большое фото
             photo = profile_photos.photos[0][-1]  # Последний элемент - самое большое фото
             photo_file = await context.bot.get_file(photo.file_id)
-            # Формируем URL для доступа к фото
-            photo_url = f"https://api.telegram.org/file/bot{context.bot.token}/{photo_file.file_path}"
+            
+            # Скачиваем и сохраняем аватар на сервере
+            photo_url = await download_and_save_avatar(context.bot, photo_file, telegram_id)
+            
     except Exception as e:
         logger.warning(f"Не удалось получить фото пользователя {telegram_id}: {e}")
     
@@ -3061,10 +3108,69 @@ def run_flask() -> None:
             elif not user.get('first_name') or not user.get('username'):
                 should_update = True  # В БД нет данных - нужно добавить
             
-            if should_update and (first_name or username or photo_url):
-                db.update_user_profile(telegram_id, username=username, first_name=first_name, photo_url=photo_url)
+            # Если есть photo_url из initData (Telegram CDN), проверяем и скачиваем аватар
+            server_photo_url = photo_url
+            if photo_url and user_data_from_init and photo_url.startswith('https://'):
+                # Проверяем, есть ли уже сохраненный файл
+                extensions = ['jpg', 'jpeg', 'png', 'webp']
+                avatar_exists = False
+                for ext in extensions:
+                    test_path = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
+                    if os.path.exists(test_path):
+                        server_photo_url = f"/api/avatar/{telegram_id}"
+                        avatar_exists = True
+                        break
+                
+                # Если файла нет, скачиваем в фоне
+                if not avatar_exists:
+                    def download_avatar_sync():
+                        try:
+                            import requests
+                            response = requests.get(photo_url, timeout=10)
+                            if response.status_code == 200:
+                                # Определяем расширение
+                                content_type = response.headers.get('Content-Type', 'image/jpeg')
+                                ext = 'jpg'
+                                if 'png' in content_type:
+                                    ext = 'png'
+                                elif 'webp' in content_type:
+                                    ext = 'webp'
+                                
+                                # Сохраняем файл
+                                filename = f"{telegram_id}.{ext}"
+                                filepath = os.path.join(AVATARS_DIR, filename)
+                                
+                                with open(filepath, 'wb') as f:
+                                    f.write(response.content)
+                                
+                                logger.info(f"[Avatar] Аватар скачан и сохранен для пользователя {telegram_id}")
+                        except Exception as e:
+                            logger.warning(f"[Avatar] Ошибка скачивания аватара: {e}")
+                    
+                    # Запускаем в отдельном потоке (не блокируем ответ)
+                    threading.Thread(target=download_avatar_sync, daemon=True).start()
+            
+            # Если photo_url уже путь сервера, оставляем как есть
+            if photo_url and photo_url.startswith('/api/avatar/'):
+                server_photo_url = photo_url
+            
+            if should_update and (first_name or username or server_photo_url):
+                db.update_user_profile(telegram_id, username=username, first_name=first_name, photo_url=server_photo_url)
                 masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
                 logger.info(f"[API User Status] ✅ Профиль пользователя обновлен: {masked_id}")
+            
+            # Обновляем photo_url в ответе на серверный путь если есть сохраненный файл
+            final_photo_url = photo_url
+            if photo_url and photo_url.startswith('https://'):
+                # Проверяем наличие на сервере
+                extensions = ['jpg', 'jpeg', 'png', 'webp']
+                for ext in extensions:
+                    test_path = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
+                    if os.path.exists(test_path):
+                        final_photo_url = f"/api/avatar/{telegram_id}"
+                        break
+            elif photo_url and photo_url.startswith('/api/avatar/'):
+                final_photo_url = photo_url
             
             # Получаем статус подписки
             has_sub = db.has_active_subscription(telegram_id, username)
@@ -3080,7 +3186,7 @@ def run_flask() -> None:
                     "telegram_id": telegram_id,
                     "first_name": first_name or "Пользователь",
                     "username": username,
-                    "photo_url": photo_url
+                    "photo_url": final_photo_url
                 },
                 "subscription": {
                     "has_subscription": has_sub or is_trial_active,
@@ -3187,6 +3293,46 @@ def run_flask() -> None:
             
         except Exception as e:
             logger.error(f"[API User Status] Ошибка: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route("/api/avatar/<int:telegram_id>", methods=["GET"])
+    def api_get_avatar(telegram_id):
+        """
+        Получение аватара пользователя по telegram_id
+        """
+        try:
+            # Ищем файл аватара в папке avatars
+            # Пробуем разные расширения
+            extensions = ['jpg', 'jpeg', 'png', 'webp']
+            avatar_path = None
+            content_type = 'image/jpeg'
+            
+            for ext in extensions:
+                test_path = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
+                if os.path.exists(test_path):
+                    avatar_path = test_path
+                    if ext == 'png':
+                        content_type = 'image/png'
+                    elif ext == 'webp':
+                        content_type = 'image/webp'
+                    break
+            
+            if not avatar_path or not os.path.exists(avatar_path):
+                logger.warning(f"[Avatar API] Аватар не найден для пользователя {telegram_id}")
+                # Возвращаем 404
+                from flask import abort
+                return abort(404)
+            
+            # Отправляем файл
+            from flask import send_from_directory
+            return send_from_directory(
+                AVATARS_DIR,
+                os.path.basename(avatar_path),
+                mimetype=content_type
+            )
+            
+        except Exception as e:
+            logger.error(f"[Avatar API] Ошибка получения аватара: {e}", exc_info=True)
             return jsonify({"error": str(e)}), 500
     
     @app.route("/api/admin/stats", methods=["POST", "OPTIONS"])

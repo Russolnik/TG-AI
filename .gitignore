@@ -1,16 +1,17 @@
-# Environment variables
-.env
-.env.local
-
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-venv/
 env/
+venv/
 ENV/
+.venv
+
+# Environment
+.env
+.env.local
 
 # IDE
 .vscode/
@@ -18,15 +19,6 @@ ENV/
 *.swp
 *.swo
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
+# Project specific
+avatars/
 *.log
-logs/
-
-# Temporary files
-*.tmp
-*.temp
-
