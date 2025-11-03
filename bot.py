@@ -61,23 +61,44 @@ async def download_and_save_avatar(bot, photo_file, telegram_id: int) -> Optiona
         str: URL для доступа к аватару через сервер или None при ошибке
     """
     try:
+        logger.info(f"[Avatar Download] 🔍 Начало скачивания аватара для пользователя {telegram_id}")
+        
+        # Проверяем что папка существует
+        if not os.path.exists(AVATARS_DIR):
+            logger.warning(f"[Avatar Download] ⚠️ Папка {AVATARS_DIR} не существует, создаем...")
+            os.makedirs(AVATARS_DIR, exist_ok=True)
+            logger.info(f"[Avatar Download] ✅ Папка {AVATARS_DIR} создана")
+        
         # Определяем расширение файла
         file_extension = 'jpg'  # По умолчанию JPG
         if photo_file.file_path:
             ext = os.path.splitext(photo_file.file_path)[1].lower()
             if ext in ['.jpg', '.jpeg', '.png', '.webp']:
                 file_extension = ext.lstrip('.')
+        logger.info(f"[Avatar Download] 📁 Расширение файла: {file_extension}")
         
         # Имя файла: {telegram_id}.{extension}
         filename = f"{telegram_id}.{file_extension}"
         filepath = os.path.join(AVATARS_DIR, filename)
+        logger.info(f"[Avatar Download] 📂 Путь сохранения: {filepath}")
         
         # Скачиваем файл
+        logger.info(f"[Avatar Download] ⬇️ Начало скачивания файла (file_id: {photo_file.file_id[:20]}...)")
         photo_bytes = await photo_file.download_as_bytearray()
+        logger.info(f"[Avatar Download] ✅ Файл скачан, размер: {len(photo_bytes)} байт")
         
         # Сохраняем на диск (временно, на время сессии)
         with open(filepath, 'wb') as f:
             f.write(photo_bytes)
+        logger.info(f"[Avatar Download] 💾 Файл сохранен на диск: {filepath}")
+        
+        # Проверяем что файл действительно сохранен
+        if os.path.exists(filepath):
+            file_size = os.path.getsize(filepath)
+            logger.info(f"[Avatar Download] ✅ Файл подтвержден на диске, размер: {file_size} байт")
+        else:
+            logger.error(f"[Avatar Download] ❌ Файл не найден после сохранения: {filepath}")
+            return None
         
         # Обновляем время последней активности
         import time
@@ -460,22 +481,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Получаем и сохраняем фото профиля (если доступно)
     photo_url = None
     try:
+        logger.info(f"[Start] 🔍 Попытка получить фото профиля для пользователя {telegram_id}")
         # Получаем фото профиля пользователя через get_user_profile_photos
         profile_photos = await context.bot.get_user_profile_photos(telegram_id, limit=1)
-        if profile_photos and profile_photos.photos:
+        
+        logger.info(f"[Start] Результат get_user_profile_photos: profile_photos={profile_photos is not None}, "
+                   f"total_count={profile_photos.total_count if profile_photos else 0}, "
+                   f"has_photos={profile_photos.photos is not None if profile_photos else False}, "
+                   f"photos_count={len(profile_photos.photos) if profile_photos and profile_photos.photos else 0}")
+        
+        if profile_photos and profile_photos.photos and len(profile_photos.photos) > 0:
             # Берем самое большое фото
             photo = profile_photos.photos[0][-1]  # Последний элемент - самое большое фото
+            logger.info(f"[Start] ✅ Найдено фото для пользователя {telegram_id}, file_id={photo.file_id[:20]}...")
+            
             photo_file = await context.bot.get_file(photo.file_id)
+            logger.info(f"[Start] ✅ Файл получен, размер={photo_file.file_size if photo_file.file_size else 'неизвестен'}")
             
             # Скачиваем и сохраняем аватар на сервере
             photo_url = await download_and_save_avatar(context.bot, photo_file, telegram_id)
             if photo_url:
                 logger.info(f"[Start] ✅ Аватар успешно сохранен для пользователя {telegram_id}: {photo_url}")
             else:
-                logger.warning(f"[Start] ⚠️ Не удалось сохранить аватар для пользователя {telegram_id}")
+                logger.warning(f"[Start] ⚠️ Не удалось сохранить аватар для пользователя {telegram_id} (download_and_save_avatar вернул None)")
+        else:
+            logger.warning(f"[Start] ⚠️ У пользователя {telegram_id} нет фото профиля или фото недоступны")
             
     except Exception as e:
-        logger.warning(f"[Start] Не удалось получить фото пользователя {telegram_id}: {e}", exc_info=True)
+        logger.error(f"[Start] ❌ Ошибка при получении фото пользователя {telegram_id}: {e}", exc_info=True)
     
     try:
         # Обрабатываем referral код ДО создания пользователя
@@ -2272,7 +2305,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_text,
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                    )
             except Exception as e:
                 error_msg = str(e)
                 error_lower = error_msg.lower()
@@ -2656,7 +2689,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_text,
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                    )
             except Exception as e:
                 error_msg = str(e)
                 error_lower = error_msg.lower()
