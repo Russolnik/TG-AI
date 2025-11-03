@@ -3094,27 +3094,9 @@ def run_flask() -> None:
                 "trial": trial_status
             }
             
-            # Если есть пробный период, он считается как активная подписка
-            if is_trial_active:
-                hours_remaining = trial_status.get('hours_remaining', 0)
-                days_remaining = max(0, int(hours_remaining / 24))
-                hours_left = max(0, int(hours_remaining % 24))
-                
-                from datetime import datetime, timezone, timedelta
-                now = datetime.now(timezone.utc)
-                trial_end_date = now + timedelta(hours=hours_remaining)
-                
-                response_data["subscription"] = {
-                    "has_subscription": True,
-                    "is_active": True,
-                    "is_trial": True,
-                    "days_left": days_remaining,
-                    "hours_left": round(hours_remaining, 1),
-                    "end_date": trial_end_date.isoformat(),
-                    "type": "trial",
-                    "trial_hours_remaining": hours_remaining
-                }
-            elif subscription:
+            # ПРИОРИТЕТ: Сначала проверяем обычную подписку, потом trial
+            # Если есть обычная подписка - возвращаем её, иначе возвращаем trial (если активен)
+            if subscription:
                 from datetime import datetime, timezone, timedelta
                 try:
                     end_date = datetime.fromisoformat(subscription['end_date'].replace('Z', '+00:00'))
@@ -3180,6 +3162,26 @@ def run_flask() -> None:
                         "end_date": subscription.get('end_date'),
                         "type": subscription.get('subscription_type')
                     }
+            elif is_trial_active:
+                # Если нет обычной подписки, но есть активный trial - возвращаем trial
+                hours_remaining = trial_status.get('hours_remaining', 0)
+                days_remaining = max(0, int(hours_remaining / 24))
+                hours_left = max(0, int(hours_remaining % 24))
+                
+                from datetime import datetime, timezone, timedelta
+                now = datetime.now(timezone.utc)
+                trial_end_date = now + timedelta(hours=hours_remaining)
+                
+                response_data["subscription"] = {
+                    "has_subscription": True,
+                    "is_active": True,
+                    "is_trial": True,
+                    "days_left": days_remaining,
+                    "hours_left": round(hours_remaining, 1),
+                    "end_date": trial_end_date.isoformat(),
+                    "type": "trial",
+                    "trial_hours_remaining": hours_remaining
+                }
             
             return jsonify(response_data), 200
             
