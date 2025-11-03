@@ -38,13 +38,19 @@ db = Database()
 key_manager = APIKeyManager(db)
 handlers = None  # Инициализируется при первом использовании
 
-# Папка для хранения аватаров
+# Папка для хранения аватаров (временные, на время сессии)
 AVATARS_DIR = os.path.join(os.path.dirname(__file__), 'avatars')
 os.makedirs(AVATARS_DIR, exist_ok=True)
 
+# Словарь для отслеживания активности пользователей (для управления временными аватарами)
+# Формат: {telegram_id: timestamp последней активности}
+user_avatar_sessions = {}
+AVATAR_SESSION_TIMEOUT = 3600  # 1 час неактивности = удаление аватара
+
 async def download_and_save_avatar(bot, photo_file, telegram_id: int) -> Optional[str]:
     """
-    Скачивает и сохраняет аватар пользователя на сервере
+    Скачивает и сохраняет аватар пользователя на сервере (временно, на время сессии)
+    НЕ сохраняет в БД, удаляется при завершении сессии или неактивности
     
     Args:
         bot: Экземпляр Telegram бота
@@ -69,11 +75,15 @@ async def download_and_save_avatar(bot, photo_file, telegram_id: int) -> Optiona
         # Скачиваем файл
         photo_bytes = await photo_file.download_as_bytearray()
         
-        # Сохраняем на диск (синхронно, т.к. мы уже в async контексте)
+        # Сохраняем на диск (временно, на время сессии)
         with open(filepath, 'wb') as f:
             f.write(photo_bytes)
         
-        logger.info(f"✅ Аватар сохранен для пользователя {telegram_id}: {filename}")
+        # Обновляем время последней активности
+        import time
+        user_avatar_sessions[telegram_id] = time.time()
+        
+        logger.info(f"✅ Аватар сохранен временно для пользователя {telegram_id}: {filename} (сессия активна)")
         
         # Возвращаем относительный путь (будет использоваться через endpoint)
         # Формат: /api/avatar/{telegram_id}
@@ -82,6 +92,59 @@ async def download_and_save_avatar(bot, photo_file, telegram_id: int) -> Optiona
     except Exception as e:
         logger.error(f"❌ Ошибка при сохранении аватара для пользователя {telegram_id}: {e}", exc_info=True)
         return None
+
+def update_user_avatar_session(telegram_id: int):
+    """Обновить время последней активности для пользователя"""
+    import time
+    user_avatar_sessions[telegram_id] = time.time()
+
+def cleanup_expired_avatars():
+    """Удалить аватары неактивных пользователей"""
+    import time
+    current_time = time.time()
+    expired_users = []
+    
+    for telegram_id, last_activity in list(user_avatar_sessions.items()):
+        if current_time - last_activity > AVATAR_SESSION_TIMEOUT:
+            expired_users.append(telegram_id)
+    
+    for telegram_id in expired_users:
+        # Удаляем файл аватара
+        extensions = ['jpg', 'jpeg', 'png', 'webp']
+        for ext in extensions:
+            filepath = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    logger.info(f"🗑️ Удален аватар неактивного пользователя {telegram_id}: {ext}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка удаления аватара {telegram_id}.{ext}: {e}")
+        
+        # Удаляем из словаря сессий
+        user_avatar_sessions.pop(telegram_id, None)
+    
+    if expired_users:
+        logger.info(f"🧹 Очищено {len(expired_users)} неактивных аватаров")
+
+def delete_user_avatar(telegram_id: int):
+    """Удалить аватар пользователя (при завершении сессии)"""
+    extensions = ['jpg', 'jpeg', 'png', 'webp']
+    deleted = False
+    
+    for ext in extensions:
+        filepath = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                deleted = True
+                logger.info(f"🗑️ Удален аватар пользователя {telegram_id}: {ext}")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка удаления аватара {telegram_id}.{ext}: {e}")
+    
+    # Удаляем из словаря сессий
+    user_avatar_sessions.pop(telegram_id, None)
+    
+    return deleted
 
 def validate_telegram_init_data(init_data: str, bot_token: str) -> Optional[Dict]:
     """
@@ -406,9 +469,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Скачиваем и сохраняем аватар на сервере
             photo_url = await download_and_save_avatar(context.bot, photo_file, telegram_id)
+            if photo_url:
+                logger.info(f"[Start] ✅ Аватар успешно сохранен для пользователя {telegram_id}: {photo_url}")
+            else:
+                logger.warning(f"[Start] ⚠️ Не удалось сохранить аватар для пользователя {telegram_id}")
             
     except Exception as e:
-        logger.warning(f"Не удалось получить фото пользователя {telegram_id}: {e}")
+        logger.warning(f"[Start] Не удалось получить фото пользователя {telegram_id}: {e}", exc_info=True)
     
     try:
         # Обрабатываем referral код ДО создания пользователя
@@ -438,11 +505,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 referrer_id = None
         
         # Получаем или назначаем ключ пользователю (с данными профиля)
+        # НЕ передаем photo_url в БД, храним только локально на время сессии
         key_id, api_key, status = key_manager.assign_key_to_user(telegram_id, 
                                                                  username=username, 
                                                                  first_name=first_name, 
-                                                                 photo_url=photo_url,
+                                                                 photo_url=None,  # Не сохраняем в БД
                                                                  referrer_id=referrer_id)
+        
+        # Обновляем активность сессии если аватар был сохранен
+        if photo_url:
+            update_user_avatar_session(telegram_id)
         
         if status == "limit_exceeded":
             await update.message.reply_text(
@@ -463,8 +535,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     needs_update = True
                 
                 if needs_update:
-                    db.update_user_profile(telegram_id, username=username, first_name=first_name, photo_url=photo_url)
+                    # Обновляем только username и first_name, photo_url НЕ сохраняем в БД
+                    db.update_user_profile(telegram_id, username=username, first_name=first_name, photo_url=None)
                     logger.info(f"[Start] ✅ Профиль существующего пользователя обновлен: {telegram_id}")
+                
+                # Обновляем активность сессии аватара
+                if photo_url:
+                    update_user_avatar_session(telegram_id)
             
             welcome_msg = (
                 "👋 Добро пожаловать обратно!\n\n"
@@ -2942,7 +3019,7 @@ def run_flask() -> None:
                     "active_key_id": user.get('active_key_id'),
                     "username": user.get('username'),
                     "first_name": user.get('first_name'),
-                    "photo_url": user.get('photo_url')
+                    "photo_url": None  # Аватары не хранятся в БД, только локально на время сессии
                 },
                 "exists": True
             }), 200
@@ -3015,13 +3092,28 @@ def run_flask() -> None:
                             "telegram_id": telegram_id
                         }), 404
                     
+                    # Проверяем наличие файла аватара локально (НЕ из БД, т.к. аватары хранятся только на время сессии)
+                    final_photo_url = None
+                    extensions = ['jpg', 'jpeg', 'png', 'webp']
+                    for ext in extensions:
+                        test_path = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
+                        if os.path.exists(test_path):
+                            final_photo_url = f"/api/avatar/{telegram_id}"
+                            update_user_avatar_session(telegram_id)  # Обновляем активность
+                            break
+                    
+                    # Очищаем неактивные аватары
+                    cleanup_expired_avatars()
+                    
+                    logger.info(f"[Avatar GET] photo_url для пользователя {telegram_id}: {final_photo_url}")
+                    
                     # Возвращаем базовые данные
                     return jsonify({
                         "user": {
                             "telegram_id": telegram_id,
                             "first_name": user.get('first_name') or "Пользователь",
                             "username": user.get('username'),
-                            "photo_url": user.get('photo_url')
+                            "photo_url": final_photo_url
                         }
                     }), 200
                 except (ValueError, TypeError):
@@ -3101,6 +3193,9 @@ def run_flask() -> None:
             if not photo_url:
                 photo_url = user.get('photo_url')
             
+            # Логируем текущее состояние данных
+            logger.info(f"[API User Status] Данные пользователя {telegram_id}: first_name={bool(first_name)}, username={bool(username)}, photo_url={photo_url}, photo_url_from_init={bool(user_data_from_init and user_data_from_init.get('photo_url'))}")
+            
             # ВСЕГДА обновляем профиль если данные из initData доступны или если в БД нет username/first_name
             should_update = False
             if user_data_from_init:
@@ -3108,8 +3203,8 @@ def run_flask() -> None:
             elif not user.get('first_name') or not user.get('username'):
                 should_update = True  # В БД нет данных - нужно добавить
             
-            # Если есть photo_url из initData (Telegram CDN), проверяем и скачиваем аватар
-            server_photo_url = photo_url
+            # Если есть photo_url из initData (Telegram CDN), скачиваем аватар локально (НЕ в БД)
+            final_photo_url = None
             if photo_url and user_data_from_init and photo_url.startswith('https://'):
                 # Проверяем, есть ли уже сохраненный файл
                 extensions = ['jpg', 'jpeg', 'png', 'webp']
@@ -3117,8 +3212,9 @@ def run_flask() -> None:
                 for ext in extensions:
                     test_path = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
                     if os.path.exists(test_path):
-                        server_photo_url = f"/api/avatar/{telegram_id}"
+                        final_photo_url = f"/api/avatar/{telegram_id}"
                         avatar_exists = True
+                        update_user_avatar_session(telegram_id)  # Обновляем активность
                         break
                 
                 # Если файла нет, скачиваем в фоне
@@ -3143,34 +3239,33 @@ def run_flask() -> None:
                                 with open(filepath, 'wb') as f:
                                     f.write(response.content)
                                 
-                                logger.info(f"[Avatar] Аватар скачан и сохранен для пользователя {telegram_id}")
+                                # Обновляем активность сессии
+                                update_user_avatar_session(telegram_id)
+                                logger.info(f"[Avatar] Аватар скачан и сохранен временно для пользователя {telegram_id}")
                         except Exception as e:
                             logger.warning(f"[Avatar] Ошибка скачивания аватара: {e}")
                     
                     # Запускаем в отдельном потоке (не блокируем ответ)
                     threading.Thread(target=download_avatar_sync, daemon=True).start()
             
-            # Если photo_url уже путь сервера, оставляем как есть
-            if photo_url and photo_url.startswith('/api/avatar/'):
-                server_photo_url = photo_url
-            
-            if should_update and (first_name or username or server_photo_url):
-                db.update_user_profile(telegram_id, username=username, first_name=first_name, photo_url=server_photo_url)
-                masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
-                logger.info(f"[API User Status] ✅ Профиль пользователя обновлен: {masked_id}")
-            
-            # Обновляем photo_url в ответе на серверный путь если есть сохраненный файл
-            final_photo_url = photo_url
-            if photo_url and photo_url.startswith('https://'):
-                # Проверяем наличие на сервере
+            # Если файл уже есть на сервере (из предыдущей сессии), используем его
+            if not final_photo_url:
                 extensions = ['jpg', 'jpeg', 'png', 'webp']
                 for ext in extensions:
                     test_path = os.path.join(AVATARS_DIR, f"{telegram_id}.{ext}")
                     if os.path.exists(test_path):
                         final_photo_url = f"/api/avatar/{telegram_id}"
+                        update_user_avatar_session(telegram_id)  # Обновляем активность
                         break
-            elif photo_url and photo_url.startswith('/api/avatar/'):
-                final_photo_url = photo_url
+            
+            # Обновляем профиль (username, first_name), но НЕ photo_url в БД
+            if should_update and (first_name or username):
+                db.update_user_profile(telegram_id, username=username, first_name=first_name, photo_url=None)
+                masked_id = f"***{str(telegram_id)[-4:]}" if telegram_id else "неизвестен"
+                logger.info(f"[API User Status] ✅ Профиль пользователя обновлен (без photo_url в БД): {masked_id}")
+            
+            # photo_url теперь берется только из локального файла (если он есть)
+            # Не используем photo_url из БД, так как аватары хранятся только локально на время сессии
             
             # Получаем статус подписки
             has_sub = db.has_active_subscription(telegram_id, username)
@@ -3181,12 +3276,13 @@ def run_flask() -> None:
             is_trial_active = trial_status.get('is_active', False)
             
             # Формируем ответ - пробный период считается как активная подписка
+            # final_photo_url устанавливается выше (из локального файла, если есть)
             response_data = {
                 "user": {
                     "telegram_id": telegram_id,
                     "first_name": first_name or "Пользователь",
                     "username": username,
-                    "photo_url": final_photo_url
+                    "photo_url": final_photo_url  # Только если файл существует локально
                 },
                 "subscription": {
                     "has_subscription": has_sub or is_trial_active,
@@ -4172,6 +4268,9 @@ def run_cleanup_scheduler():
                 logger.info(f"[Cleanup Scheduler] ✅ Очистка завершена: освобождено {freed_count} ключей")
             else:
                 logger.debug("[Cleanup Scheduler] Нет неактивных сессий для очистки")
+            
+            # Очищаем неактивные аватары (неактивны более 1 часа)
+            cleanup_expired_avatars()
                 
         except Exception as e:
             logger.error(f"[Cleanup Scheduler] Ошибка при очистке неактивных сессий: {e}", exc_info=True)
