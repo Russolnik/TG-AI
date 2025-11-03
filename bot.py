@@ -2232,158 +2232,64 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Проверяем, является ли это запросом на генерацию изображения
         if is_image_generation_request(user_text):
-            # Получаем API ключ пользователя для прямой генерации (назначится автоматически если его нет)
-            try:
-                # Пытаемся назначить ключ автоматически если его нет
-                user_temp = db.get_user(telegram_id)
-                if not user_temp or not user_temp.get('active_key_id'):
-                    logger.warning(f"[Handle Text Generation] ⚠️ API ключ не найден, пытаемся назначить автоматически...")
-                    key_manager.assign_key_to_user(telegram_id, 
-                                                  username=user_temp.get('username') if user_temp else None,
-                                                  first_name=user_temp.get('first_name') if user_temp else None,
-                                                  photo_url=None)
-                
-                api_key = key_manager.get_user_api_key(telegram_id)
-                if not api_key:
-                    await update.message.reply_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
-                    return
-            except Exception as e:
-                logger.error(f"[Handle Text Generation] ❌ Ошибка получения API ключа: {e}")
-                await update.message.reply_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
-                return
+            # ПРОВЕРКА ПОДПИСКИ ПЕРЕД ГЕНЕРАЦИЕЙ
+            has_subscription = db.has_active_subscription(telegram_id)
+            trial_status = db.get_trial_status(telegram_id)
+            is_trial_active = trial_status.get('is_active', False)
             
-            # Отправляем статус генерации
-            status_msg = await update.message.reply_text("🎨 Генерирую контент (изображение и текст)...")
-            
-            # Получаем выбранную модель пользователя
-            user_model_key = db.get_user_model(telegram_id)
-            
-            # Прямая генерация через модель для генерации изображений (без посредничества)
-            try:
-                text_response, generated_image = await generate_content_direct(api_key, user_text, None, user_model_key)
-                
-                await status_msg.delete()
-                
-                # Получаем или создаем чат для генерации изображений
-                chat_id, chat = get_active_chat_for_user(telegram_id, context)
-                if not chat_id:
-                    # Создаем новый чат для генерации если нет активного
-                    chat = db.create_chat(telegram_id, "Генерация изображений", "generation")
-                    if chat:
-                        chat_id = UUID(chat['chat_id'])
-                        context.user_data['active_chat_id'] = str(chat_id)
-                
-                # Сохраняем запрос пользователя в БД ДО генерации
-                if chat_id:
-                    db.add_message(chat_id, "user", user_text, "generation_request")
-                
-                # Если есть изображение, отправляем его
-                if generated_image:
-                    image_buffer = BytesIO(generated_image)
-                    image_buffer.name = 'generated_image.png'
-                    
-                    # Если есть текстовый ответ, добавляем в caption
-                    caption = f"🎨 Изображение сгенерировано по запросу: {user_text}"
-                    if text_response:
-                        caption += f"\n\n{text_response[:500]}"  # Ограничиваем длину caption
-                    
-                    await update.message.reply_photo(
-                        photo=InputFile(image_buffer, filename='generated_image.png'),
-                        caption=caption
-                    )
-                    
-                    # Сохраняем контекст генерации в БД (только текстовый ответ, без самого изображения)
-                    context_text = f"Сгенерировано изображение по запросу: {user_text}"
-                    if text_response:
-                        context_text += f"\nОтвет модели: {text_response[:200]}"
-                    db.add_message(chat_id, "model", context_text, "generation_response")
-                    
-                    # Обновляем краткое описание контекста чата
-                    db.update_chat_context(chat_id, f"Последняя генерация: {user_text[:100]}")
-                    
-                    # Если текстовый ответ длинный, отправляем отдельным сообщением
-                    if text_response and len(text_response) > 500:
-                        await safe_send_message(update, text_response)
-                
-                # Если только текст без изображения
-                elif text_response:
-                    await safe_send_message(update, f"📝 Ответ:\n\n{text_response}")
-                    
-                    # Сохраняем ответ модели в БД
-                    db.add_message(chat_id, "model", text_response, "generation_response")
-                    
-                    # Если не было изображения, но был запрос на генерацию - показываем информацию о miniapp
-                    has_subscription = db.has_active_subscription(telegram_id)
-                    trial_status = db.get_trial_status(telegram_id)
-                    is_trial_active = trial_status.get('is_active', False)
-                    
-                    message_text = (
-                        "🎨 **Генерация изображений доступна в Mini App**\n\n"
-                        "Генерация изображений работает только через Mini App (веб-версию бота).\n\n"
-                    )
-                    
-                    if has_subscription or is_trial_active:
-                        message_text += (
-                            "✅ У вас есть активная подписка.\n\n"
-                            "📱 Откройте Mini App через кнопку меню в боте или используйте команду /app\n\n"
-                            "В Mini App вы найдете раздел '🎨 Генерация изображений'."
-                        )
-                        keyboard = [
-                            [InlineKeyboardButton("📱 Открыть Mini App", web_app=WebAppInfo(url=config.MINI_APP_URL))]
-                        ]
-                else:
-                        message_text += (
-                            "💎 **Требуется подписка**\n\n"
-                            "Для использования генерации изображений нужна активная подписка.\n\n"
-                            "Используйте команду /subscription для оформления подписки или /trial для пробного периода."
-                        )
-                        keyboard = [
-                            [InlineKeyboardButton("💎 Оформить подписку", callback_data="sub_menu")],
-                            [InlineKeyboardButton("🎁 Пробный период", callback_data="trial_activate")]
-                        ]
-                    
+            # Если нет подписки и нет пробного периода - блокируем генерацию
+            if not has_subscription and not is_trial_active:
+                message_text = (
+                    "🎨 **Генерация изображений доступна только в Mini App**\n\n"
+                    "К сожалению, генерация изображений в обычном чате бота недоступна.\n\n"
+                    "Для генерации изображений необходимо:\n\n"
+                    "💎 **Требуется подписка**\n\n"
+                    "Для использования генерации изображений нужна активная подписка.\n\n"
+                    "Используйте команду /subscription для оформления подписки или /trial для пробного периода."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("💎 Оформить подписку", callback_data="sub_menu")],
+                    [InlineKeyboardButton("🎁 Пробный период", callback_data="trial_activate")]
+                ]
                 await update.message.reply_text(
                     message_text,
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-            except Exception as e:
-                error_msg = str(e)
-                error_lower = error_msg.lower()
-                logger.error(f"Ошибка при прямой генерации: {e}", exc_info=True)
-                
-                # Специальная обработка ошибок квоты и лимитов
-                if any(keyword in error_lower for keyword in ["quota", "429", "resource_exhausted", "limit", "превышен", "лимит"]):
-                    # Извлекаем информацию о времени ожидания
-                    import re
-                    retry_match = re.search(r'retry.*?(\d+(?:\.\d+)?)\s*s', error_lower)
-                    retry_seconds = int(float(retry_match.group(1))) if retry_match else None
-                    
-                    retry_text = f"\n\n⏰ Попробуйте снова через {retry_seconds} секунд." if retry_seconds else "\n\n⏰ Попробуйте позже (через несколько минут)."
-                    
-                    await status_msg.edit_text(
-                        "⚠️ **Превышен лимит запросов для генерации изображений.**\n\n"
-                        "Сервис временно недоступен из-за высокой нагрузки.\n\n"
-                        "**Что можно сделать:**\n"
-                        "• Подождите несколько минут перед повторной попыткой\n"
-                        "• Попробуйте другой запрос\n"
-                        f"{retry_text}"
-                    )
-                elif any(keyword in error_lower for keyword in ["safety", "blocked", "harmful", "policy violation", "content policy", "safety filter"]):
-                    await status_msg.edit_text(
-                        "🚫 **Запрос заблокирован.**\n\n"
-                        "Ваш запрос был отклонен системой безопасности Gemini.\n\n"
-                        "Попробуйте переформулировать запрос или использовать другие ключевые слова."
-                    )
-                else:
-                    # Общая ошибка - показываем понятное сообщение
-                    await status_msg.edit_text(
-                        "❌ **Произошла ошибка при генерации изображения.**\n\n"
-                        "К сожалению, не удалось сгенерировать изображение.\n\n"
-                        "**Возможные причины:**\n"
-                        "• Временная недоступность сервиса\n\n"
-                        "Пожалуйста, попробуйте еще раз через несколько минут."
-                    )
+                )
+                return
+            
+            # Если есть подписка или пробный период - показываем сообщение о Mini App
+            message_text = (
+                "🎨 **Генерация изображений доступна только в Mini App**\n\n"
+                "К сожалению, генерация изображений в обычном чате бота недоступна.\n\n"
+                "Для генерации изображений необходимо:\n\n"
+            )
+            
+            if has_subscription or is_trial_active:
+                message_text += (
+                    "✅ У вас есть активная подписка.\n\n"
+                    "📱 Откройте Mini App через кнопку меню в боте или используйте команду /app\n\n"
+                    "В Mini App вы найдете раздел '🎨 Генерация изображений', где можно генерировать изображения."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("📱 Открыть Mini App", web_app=WebAppInfo(url=config.MINI_APP_URL))]
+                ]
+            else:
+                message_text += (
+                    "💎 **Требуется подписка**\n\n"
+                    "Для использования генерации изображений нужна активная подписка.\n\n"
+                    "Используйте команду /subscription для оформления подписки или /trial для пробного периода."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("💎 Оформить подписку", callback_data="sub_menu")],
+                    [InlineKeyboardButton("🎁 Пробный период", callback_data="trial_activate")]
+                ]
+            
+            await update.message.reply_text(
+                message_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
         
         # Проверяем, ожидается ли ввод параметра
@@ -2638,170 +2544,64 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_generation = caption and is_image_generation_request(caption)
         
         if is_generation:
-            # Генерация изображения на основе фото и текста (прямая генерация)
-            status_msg = await update.message.reply_text("🎨 Генерирую контент на основе фото...")
+            # ПРОВЕРКА ПОДПИСКИ ПЕРЕД ГЕНЕРАЦИЕЙ
+            has_subscription = db.has_active_subscription(telegram_id)
+            trial_status = db.get_trial_status(telegram_id)
+            is_trial_active = trial_status.get('is_active', False)
             
-            # Получаем API ключ пользователя для прямой генерации (назначится автоматически если его нет)
-            try:
-                # Пытаемся назначить ключ автоматически если его нет
-                user_temp = db.get_user(telegram_id)
-                if not user_temp or not user_temp.get('active_key_id'):
-                    logger.warning(f"[Handle Photo Generation] ⚠️ API ключ не найден, пытаемся назначить автоматически...")
-                    key_manager.assign_key_to_user(telegram_id, 
-                                                  username=user_temp.get('username') if user_temp else None,
-                                                  first_name=user_temp.get('first_name') if user_temp else None,
-                                                  photo_url=None)
-                
-                api_key = key_manager.get_user_api_key(telegram_id)
-                if not api_key:
-                    await status_msg.edit_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
-                    return
-            except Exception as e:
-                logger.error(f"[Handle Photo Generation] ❌ Ошибка получения API ключа: {e}")
-                await status_msg.edit_text("❌ Ошибка: сервис временно недоступен. Попробуйте позже.")
-                return
-            
-            # Скачиваем фото
-            photo_file = await context.bot.get_file(photo.file_id)
-            photo_data = await photo_file.download_as_bytearray()
-            
-            # Получаем или создаем чат для генерации изображений
-            chat_id, chat = get_active_chat_for_user(telegram_id, context)
-            if not chat_id:
-                # Создаем новый чат для генерации если нет активного
-                chat = db.create_chat(telegram_id, "Генерация изображений", "generation")
-                if chat:
-                    chat_id = UUID(chat['chat_id'])
-                    context.user_data['active_chat_id'] = str(chat_id)
-            
-            # Формируем текст запроса
-            request_text = caption if caption else "Создай изображение на основе этого фото"
-            
-            # Сохраняем запрос пользователя с описанием фото
-            if chat_id:
-                db.add_message(chat_id, "user", f"Генерация по фото: {request_text}", "generation_request")
-            
-            # Получаем выбранную модель пользователя
-            user_model_key = db.get_user_model(telegram_id)
-            
-            # Прямая генерация через модель для генерации изображений с референсным изображением
-            try:
-                text_response, generated_image = await generate_content_direct(
-                    api_key, 
-                    request_text,
-                    bytes(photo_data),
-                    user_model_key
+            # Если нет подписки и нет пробного периода - блокируем генерацию
+            if not has_subscription and not is_trial_active:
+                message_text = (
+                    "🎨 **Генерация изображений доступна только в Mini App**\n\n"
+                    "К сожалению, генерация изображений в обычном чате бота недоступна.\n\n"
+                    "Для генерации изображений необходимо:\n\n"
+                    "💎 **Требуется подписка**\n\n"
+                    "Для использования генерации изображений нужна активная подписка.\n\n"
+                    "Используйте команду /subscription для оформления подписки или /trial для пробного периода."
                 )
-                
-                await status_msg.delete()
-                
-                # Если есть изображение, отправляем его
-                if generated_image:
-                    image_buffer = BytesIO(generated_image)
-                    image_buffer.name = 'generated_image.png'
-                    
-                    # Если есть текстовый ответ, добавляем в caption
-                    caption_text = f"🎨 Изображение сгенерировано на основе фото и запроса: {request_text}"
-                    if text_response:
-                        caption_text += f"\n\n{text_response[:500]}"
-                    
-                    await update.message.reply_photo(
-                        photo=InputFile(image_buffer, filename='generated_image.png'),
-                        caption=caption_text
-                    )
-                    
-                    # Сохраняем контекст генерации в БД
-                    if chat_id:
-                        context_text = f"Сгенерировано изображение на основе фото и запроса: {request_text}"
-                        if text_response:
-                            context_text += f"\nОтвет модели: {text_response[:200]}"
-                        db.add_message(chat_id, "model", context_text, "generation_response")
-                        db.update_chat_context(chat_id, f"Последняя генерация: {request_text[:100]}")
-                    
-                    # Если текстовый ответ длинный, отправляем отдельным сообщением
-                    if text_response and len(text_response) > 500:
-                        await safe_send_message(update, text_response)
-                
-                # Если только текст без изображения
-                elif text_response:
-                    await safe_send_message(update, f"📝 Ответ:\n\n{text_response}")
-                    
-                    # Сохраняем ответ модели в БД
-                    if chat_id:
-                        db.add_message(chat_id, "model", text_response, "generation_response")
-                    
-                    # Если не было изображения, но был запрос на генерацию - показываем информацию о miniapp
-                    has_subscription = db.has_active_subscription(telegram_id)
-                    trial_status = db.get_trial_status(telegram_id)
-                    is_trial_active = trial_status.get('is_active', False)
-                    
-                    message_text = (
-                        "🎨 **Генерация изображений доступна в Mini App**\n\n"
-                        "Генерация изображений работает только через Mini App (веб-версию бота).\n\n"
-                    )
-                    
-                    if has_subscription or is_trial_active:
-                        message_text += (
-                            "✅ У вас есть активная подписка.\n\n"
-                            "📱 Откройте Mini App через кнопку меню в боте или используйте команду /app\n\n"
-                            "В Mini App вы найдете раздел '🎨 Генерация изображений'."
-                        )
-                        keyboard = [
-                            [InlineKeyboardButton("📱 Открыть Mini App", web_app=WebAppInfo(url=config.MINI_APP_URL))]
-                        ]
-                else:
-                        message_text += (
-                            "💎 **Требуется подписка**\n\n"
-                            "Для использования генерации изображений нужна активная подписка.\n\n"
-                            "Используйте команду /subscription для оформления подписки или /trial для пробного периода."
-                        )
-                        keyboard = [
-                            [InlineKeyboardButton("💎 Оформить подписку", callback_data="sub_menu")],
-                            [InlineKeyboardButton("🎁 Пробный период", callback_data="trial_activate")]
-                        ]
-                    
+                keyboard = [
+                    [InlineKeyboardButton("💎 Оформить подписку", callback_data="sub_menu")],
+                    [InlineKeyboardButton("🎁 Пробный период", callback_data="trial_activate")]
+                ]
                 await update.message.reply_text(
                     message_text,
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-            except Exception as e:
-                error_msg = str(e)
-                error_lower = error_msg.lower()
-                logger.error(f"Ошибка при прямой генерации с фото: {e}", exc_info=True)
-                
-                # Специальная обработка ошибок квоты и лимитов
-                if any(keyword in error_lower for keyword in ["quota", "429", "resource_exhausted", "limit", "превышен", "лимит"]):
-                    # Извлекаем информацию о времени ожидания
-                    import re
-                    retry_match = re.search(r'retry.*?(\d+(?:\.\d+)?)\s*s', error_lower)
-                    retry_seconds = int(float(retry_match.group(1))) if retry_match else None
-                    
-                    retry_text = f"\n\n⏰ Попробуйте снова через {retry_seconds} секунд." if retry_seconds else "\n\n⏰ Попробуйте позже (через несколько минут)."
-                    
-                    await status_msg.edit_text(
-                        "⚠️ **Превышен лимит запросов для генерации изображений.**\n\n"
-                        "Сервис временно недоступен из-за высокой нагрузки.\n\n"
-                        "**Что можно сделать:**\n"
-                        "• Подождите несколько минут перед повторной попыткой\n"
-                        "• Попробуйте другой запрос\n"
-                        f"{retry_text}"
-                    )
-                elif any(keyword in error_lower for keyword in ["safety", "blocked", "harmful", "policy violation", "content policy", "safety filter"]):
-                    await status_msg.edit_text(
-                        "🚫 **Запрос заблокирован.**\n\n"
-                        "Ваш запрос был отклонен системой безопасности Gemini.\n\n"
-                        "Попробуйте переформулировать запрос или использовать другие ключевые слова."
-                    )
-                else:
-                    # Общая ошибка - показываем понятное сообщение
-                    await status_msg.edit_text(
-                        "❌ **Произошла ошибка при генерации изображения.**\n\n"
-                        "К сожалению, не удалось сгенерировать изображение.\n\n"
-                        "**Возможные причины:**\n"
-                        "• Временная недоступность сервиса\n\n"
-                        "Пожалуйста, попробуйте еще раз через несколько минут."
-                    )
+                )
+                return
+            
+            # Если есть подписка или пробный период - показываем сообщение о Mini App
+            message_text = (
+                "🎨 **Генерация изображений доступна только в Mini App**\n\n"
+                "К сожалению, генерация изображений в обычном чате бота недоступна.\n\n"
+                "Для генерации изображений необходимо:\n\n"
+            )
+            
+            if has_subscription or is_trial_active:
+                message_text += (
+                    "✅ У вас есть активная подписка.\n\n"
+                    "📱 Откройте Mini App через кнопку меню в боте или используйте команду /app\n\n"
+                    "В Mini App вы найдете раздел '🎨 Генерация изображений', где можно генерировать изображения."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("📱 Открыть Mini App", web_app=WebAppInfo(url=config.MINI_APP_URL))]
+                ]
+            else:
+                message_text += (
+                    "💎 **Требуется подписка**\n\n"
+                    "Для использования генерации изображений нужна активная подписка.\n\n"
+                    "Используйте команду /subscription для оформления подписки или /trial для пробного периода."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("💎 Оформить подписку", callback_data="sub_menu")],
+                    [InlineKeyboardButton("🎁 Пробный период", callback_data="trial_activate")]
+                ]
+            
+            await update.message.reply_text(
+                message_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             return
         
         # Обычная обработка фото (анализ)
